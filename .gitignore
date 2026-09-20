@@ -21,7 +21,8 @@ wheels/
 *.egg
 
 # Virtual environments
-.venv/
+.env/
+.kratosvenv/
 venv/
 ENV/
 env/
