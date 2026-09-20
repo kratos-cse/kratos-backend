@@ -1,2 +1,5 @@
-fastapi==0.141.1
-uvicorn[standard]==0.53.0
+fastapi>=0.115
+uvicorn[standard]>=0.30
+supabase>=2.9
+razorpay>=1.4
+pydantic>=2.9
