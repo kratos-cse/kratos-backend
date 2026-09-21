@@ -8,6 +8,24 @@ class EventStatus(str, enum.Enum):
     CANCELLED = "CANCELLED"
 
 
+class EventSlot(str, enum.Enum):
+    """
+    New field, added on top of starts_at/ends_at. Lets an organizer label
+    a session explicitly (e.g. market an 11:50 AM start as "Afternoon")
+    rather than always deriving it from the raw start time.
+
+    NOT part of the original finalized schema doc — added at the user's
+    request. Since `events` is a table other feature branches also read,
+    flag this to the team before merging so nobody else's code is
+    surprised by the new column.
+    """
+    MORNING = "MORNING"
+    AFTERNOON = "AFTERNOON"
+    EVENING = "EVENING"
+    FULL_DAY = "FULL_DAY"
+    MULTI_DAY = "MULTI_DAY"
+
+
 class FeeChargeModel(str, enum.Enum):
     PER_TEAM = "PER_TEAM"
     PER_MEMBER = "PER_MEMBER"

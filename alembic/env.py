@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
 
-from app import models  # noqa: F401  registers every model on Base.metadata
+from app import models  # noqa: F401
 from app.core.config import settings
 from app.db.base import Base
 
@@ -19,7 +19,8 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 _FALLBACK_URL = "postgresql+asyncpg://user:pass@localhost:5432/kratos"
-config.set_main_option("sqlalchemy.url", settings.async_database_url or _FALLBACK_URL)
+_database_url = settings.async_database_url or _FALLBACK_URL
+config.set_main_option("sqlalchemy.url", _database_url.replace("%", "%%"))
 
 
 def run_migrations_offline() -> None:

@@ -5,7 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from app.models.enums import CapacityType, EventStatus, FeeChargeModel, MemberRegistrationMode
+from app.models.enums import CapacityType, EventSlot, EventStatus, FeeChargeModel, MemberRegistrationMode
 
 
 class EventListItem(BaseModel):
@@ -21,6 +21,7 @@ class EventListItem(BaseModel):
     venue: str | None
     starts_at: datetime | None
     ends_at: datetime | None
+    slot: EventSlot | None
     status: EventStatus
     registration_open: bool
     allow_individual: bool
@@ -46,6 +47,7 @@ class EventDetail(BaseModel):
     whatsapp_group_link: str | None
     starts_at: datetime | None
     ends_at: datetime | None
+    slot: EventSlot | None
     status: EventStatus
     registration_open: bool
     spots_remaining: int | None

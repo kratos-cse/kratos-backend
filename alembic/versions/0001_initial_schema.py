@@ -40,7 +40,7 @@ def upgrade() -> None:
     bind = op.get_bind()
     enum_types = {}
     for name, values in _ENUMS.items():
-        enum_type = postgresql.ENUM(*values, name=name)
+        enum_type = postgresql.ENUM(*values, name=name, create_type=False)
         enum_type.create(bind, checkfirst=True)
         enum_types[name] = enum_type
 

@@ -8,7 +8,7 @@ from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
-from app.models.enums import CapacityType, EventStatus, FeeChargeModel, MemberRegistrationMode
+from app.models.enums import CapacityType, EventSlot, EventStatus, FeeChargeModel, MemberRegistrationMode
 
 
 class Event(Base):
@@ -32,6 +32,7 @@ class Event(Base):
     status: Mapped[EventStatus] = mapped_column(
         Enum(EventStatus, name="event_status"), default=EventStatus.OPEN, nullable=False
     )
+    slot: Mapped[Optional[EventSlot]] = mapped_column(Enum(EventSlot, name="event_slot"), nullable=True)
 
     rules: Mapped[Optional["EventRegistrationRule"]] = relationship(
         "EventRegistrationRule", back_populates="event", uselist=False

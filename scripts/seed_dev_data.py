@@ -7,14 +7,19 @@ head`, once DATABASE_URL is set:
     python scripts/seed_dev_data.py
 """
 import asyncio
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from app.db.session import AsyncSessionLocal
-from app.models.enums import CapacityType, EventStatus, FeeChargeModel, MemberRegistrationMode
+from app.models.enums import CapacityType, EventSlot, EventStatus, FeeChargeModel, MemberRegistrationMode
 from app.models.event import Event, EventRegistrationRule
+
+IST = ZoneInfo("Asia/Kolkata")
 
 
 async def seed() -> None:
     async with AsyncSessionLocal() as db:
+        # Morning slot, single day.
         solo_event = Event(
             name="Code Sprint (Solo)",
             short_desc="Individual competitive programming round.",
@@ -22,6 +27,9 @@ async def seed() -> None:
             fee=100,
             venue="Lab 2",
             status=EventStatus.OPEN,
+            starts_at=datetime(2026, 10, 15, 10, 0, tzinfo=IST),  # 10:00 AM IST
+            ends_at=datetime(2026, 10, 15, 13, 0, tzinfo=IST),  # 1:00 PM IST
+            slot=EventSlot.MORNING,
         )
         db.add(solo_event)
         await db.flush()
@@ -47,6 +55,9 @@ async def seed() -> None:
             fee=500,
             venue="Main Auditorium",
             status=EventStatus.OPEN,
+            starts_at=datetime(2026, 10, 18, 14, 0, tzinfo=IST),  # 2:00 PM IST, Day 1
+            ends_at=datetime(2026, 10, 19, 14, 0, tzinfo=IST),  # 2:00 PM IST, Day 2 (24 hrs later)
+            slot=EventSlot.MULTI_DAY,
         )
         db.add(team_event)
         await db.flush()
