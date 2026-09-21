@@ -1,22 +1,22 @@
 -- Payments & Refunds module — owns payments, receipts.
 --
 -- Uses TEXT + CHECK rather than native Postgres ENUM types deliberately:
--- other branches (Authentication's Alembic migration, at least) create
--- Postgres ENUM types named payment_type/payment_status/etc. If this
--- migration and theirs both run against the same database, CREATE TYPE
--- would collide. Reconcile onto one schema owner at merge time; this file
--- is this branch's own standalone copy until then, same as teams' own
--- db/migrations/0001_teams_module.sql.
+-- other branches create Postgres ENUM types named payment_type/payment_status/etc.
+-- If this migration and theirs both run against the same database, CREATE TYPE
+-- would collide. Reconcile onto one schema owner at merge time.
 --
--- Does NOT create profiles/events/event_registration_rules/registrations/
--- teams/team_members — those belong to other branches. This module reads
--- them (see app/models/external_mirrors.py) but never creates them.
+-- NOTE ON FOREIGN KEYS:
+-- payer_profile_id and team_member_id store UUID references to profiles(id)
+-- and team_members(id). Explicit REFERENCES constraints are omitted here
+-- so this standalone migration can run independently on fresh databases
+-- before other branch tables exist. Real FK constraints are attached upon
+-- consolidation into the main schema migration.
 
 CREATE TABLE IF NOT EXISTS payments (
     id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    payer_profile_id     UUID NOT NULL REFERENCES profiles(id),
+    payer_profile_id     UUID NOT NULL,                           -- references profiles(id) upon integration
     payment_type         TEXT NOT NULL CHECK (payment_type IN ('TEAM_REGISTRATION','SOLO_REGISTRATION','TEAM_MEMBER_TOPUP')),
-    team_member_id       UUID NULL REFERENCES team_members(id),  -- set only for TEAM_MEMBER_TOPUP
+    team_member_id       UUID NULL,                               -- references team_members(id) upon integration (TEAM_MEMBER_TOPUP only)
     razorpay_order_id    TEXT UNIQUE NOT NULL,
     razorpay_payment_id  TEXT UNIQUE NULL,                        -- set once Razorpay confirms capture
     amount_paise         BIGINT NOT NULL,                         -- integer paise, never a float rupee amount

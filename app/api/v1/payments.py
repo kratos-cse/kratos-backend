@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.core.admin_deps import require_admin_profile, require_super_admin_profile
 from app.core.config import settings
-from app.core.database import get_db
+from app.core.database import SessionLocal, get_db
 from app.core.deps_stub import StubProfile, get_current_profile  # TODO: swap for real auth dep
 from app.models.enums import PaymentStatus, PaymentType, TeamMemberStatus
 from app.models.external_mirrors import Event, EventRegistrationRule, Registration, Team, TeamMember
@@ -25,7 +25,7 @@ from app.schemas.payment import (
 )
 from app.services.amounts import compute_amount_paise
 from app.services.payment_apply import SqlAlchemyPaymentsStore, apply_payment_failure, apply_payment_success
-from app.services.razorpay_client import get_razorpay, with_retry
+from app.services.razorpay_client import get_razorpay
 from app.services.refund import RefundError, refund_payment
 from app.services.signatures import verify_checkout_signature, verify_webhook_signature
 
@@ -52,15 +52,25 @@ def create_order(
     field at all, so there is nothing for a client to supply here.
     payment_type is derived from the registration/team-member row, never
     taken from the client either.
+
+    Atomically claims the registration / team member to prevent duplicate active
+    orders under concurrent requests.
     """
     registration: Registration | None = None
 
     if body.registration_id is not None:
-        registration = db.get(Registration, body.registration_id)
+        registration = db.execute(
+            select(Registration).where(Registration.id == body.registration_id).with_for_update()
+        ).scalar_one_or_none()
         if registration is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Registration not found")
         if registration.payment_id is not None:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This registration already has a payment")
+            existing_payment = db.get(Payment, registration.payment_id)
+            if existing_payment and existing_payment.status in (PaymentStatus.PAID.value, PaymentStatus.CREATED.value):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"This registration already has an active payment or order (status={existing_payment.status})",
+                )
 
         event, rules = _load_event_and_rules(db, registration.event_id)
 
@@ -80,7 +90,9 @@ def create_order(
         team_member_id = None
 
     else:
-        team_member = db.get(TeamMember, body.team_member_id)
+        team_member = db.execute(
+            select(TeamMember).where(TeamMember.id == body.team_member_id).with_for_update()
+        ).scalar_one_or_none()
         if team_member is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Team member not found")
         if team_member.profile_id != profile.id:
@@ -90,6 +102,20 @@ def create_order(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Team member is not pending payment (status={team_member.status})",
             )
+
+        # Enforce one active payment per member
+        active_payment = db.execute(
+            select(Payment).where(
+                Payment.team_member_id == team_member.id,
+                Payment.status.in_([PaymentStatus.CREATED.value, PaymentStatus.PAID.value]),
+            ).with_for_update()
+        ).scalar_one_or_none()
+        if active_payment is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"An active payment order already exists for this team member (status={active_payment.status})",
+            )
+
         event, rules = _load_event_and_rules(db, team_member.event_id)
         payment_type = PaymentType.TEAM_MEMBER_TOPUP
         team_member_id = team_member.id
@@ -98,8 +124,8 @@ def create_order(
     amount_paise = compute_amount_paise(fee_rupees=event.fee, charge_model=charge_model, member_count=1)
 
     receipt = f"kratos26_{uuid.uuid4().hex[:16]}"
-    order = with_retry(
-        lambda: get_razorpay().order.create(
+    try:
+        order = get_razorpay().order.create(
             {
                 "amount": amount_paise,
                 "currency": "INR",
@@ -107,7 +133,12 @@ def create_order(
                 "notes": {"payment_type": payment_type.value, "event_id": str(event.id)},
             }
         )
-    )
+    except Exception as err:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to create Razorpay order: {err}",
+        )
 
     payment = Payment(
         payer_profile_id=profile.id,
@@ -144,6 +175,12 @@ def verify_payment(
     db: Session = Depends(get_db),
     profile: StubProfile = Depends(get_current_profile),
 ):
+    if not settings.has_checkout_secret:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Payment verification service is not configured (missing key secret)",
+        )
+
     payment = db.execute(select(Payment).where(Payment.razorpay_order_id == body.razorpay_order_id)).scalar_one_or_none()
     if payment is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown order")
@@ -161,35 +198,46 @@ def verify_payment(
 
     store = SqlAlchemyPaymentsStore(db)
     apply_result = apply_payment_success(store, payment.id, body.razorpay_payment_id)
-    return VerifyPaymentResponse(payment_id=payment.id, applied=apply_result.applied, status=PaymentStatus.PAID)
+
+    # Refresh payment from db to return actual persisted status (e.g. if payment was REFUNDED)
+    db.refresh(payment)
+    persisted_status = PaymentStatus(payment.status)
+
+    return VerifyPaymentResponse(
+        payment_id=payment.id,
+        applied=apply_result.applied,
+        status=persisted_status,
+    )
 
 
-def _process_webhook_sync(db: Session, event: dict) -> dict:
-    entity = (event.get("payload") or {}).get("payment", {}).get("entity", {})
-    order_id = entity.get("order_id")
-    if not order_id:
-        # Signature-valid event we do not act on (a webhook type we do not
-        # subscribe to). Acknowledge it so Razorpay stops retrying.
+def _process_webhook_sync(event: dict) -> dict:
+    """Executed inside a worker thread with its own independent SessionLocal."""
+    with SessionLocal() as db:
+        entity = (event.get("payload") or {}).get("payment", {}).get("entity", {})
+        order_id = entity.get("order_id")
+        if not order_id:
+            # Signature-valid event we do not act on (a webhook type we do not
+            # subscribe to). Acknowledge it so Razorpay stops retrying.
+            return {"received": True, "applied": False}
+
+        payment = db.execute(select(Payment).where(Payment.razorpay_order_id == order_id)).scalar_one_or_none()
+        if payment is None:
+            # Unknown order: nothing in our system to update. Still 200, since
+            # retrying will not make the order exist, and Razorpay's retry policy
+            # would otherwise hammer us.
+            return {"received": True, "applied": False, "reason": "unknown order"}
+
+        store = SqlAlchemyPaymentsStore(db)
+        if event.get("event") == "payment.captured":
+            result = apply_payment_success(store, payment.id, entity["id"])
+            return {"received": True, "applied": result.applied}
+        if event.get("event") == "payment.failed":
+            result = apply_payment_failure(store, payment.id)
+            return {"received": True, "applied": result.applied}
+
+        # Any other event type (refund events, order.paid, etc.): acknowledged,
+        # not acted on.
         return {"received": True, "applied": False}
-
-    payment = db.execute(select(Payment).where(Payment.razorpay_order_id == order_id)).scalar_one_or_none()
-    if payment is None:
-        # Unknown order: nothing in our system to update. Still 200, since
-        # retrying will not make the order exist, and Razorpay's retry policy
-        # would otherwise hammer us.
-        return {"received": True, "applied": False, "reason": "unknown order"}
-
-    store = SqlAlchemyPaymentsStore(db)
-    if event.get("event") == "payment.captured":
-        result = apply_payment_success(store, payment.id, entity["id"])
-        return {"received": True, "applied": result.applied}
-    if event.get("event") == "payment.failed":
-        result = apply_payment_failure(store, payment.id)
-        return {"received": True, "applied": result.applied}
-
-    # Any other event type (refund events, order.paid, etc.): acknowledged,
-    # not acted on.
-    return {"received": True, "applied": False}
 
 
 # Source of truth for payment state. Must work even if the user's browser never
@@ -198,11 +246,16 @@ def _process_webhook_sync(db: Session, event: dict) -> dict:
 # return 200 once the signature is valid, even when the event is a no-op.
 #
 # Only async route in this module — reading the raw request body needs
-# `await request.body()`. The DB work is offloaded via asyncio.to_thread so
-# it doesn't block the event loop; every other route here is sync `def` and
-# FastAPI already runs those in a worker thread.
+# `await request.body()`. The DB work is offloaded via asyncio.to_thread with
+# its own thread-safe SessionLocal.
 @router.post("/payments/webhook")
-async def payments_webhook(request: Request, db: Session = Depends(get_db)):
+async def payments_webhook(request: Request):
+    if not settings.has_webhook_secret:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Webhook service is not configured (missing webhook secret)",
+        )
+
     # Read as raw bytes FIRST. Hashing after json-parsing and re-serializing
     # will never match Razorpay's signature over the original wire bytes.
     raw_body = await request.body()
@@ -221,9 +274,7 @@ async def payments_webhook(request: Request, db: Session = Depends(get_db)):
     except Exception:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Malformed JSON")
 
-    # Reusing the request-scoped `db` inside the worker thread is safe here:
-    # nothing else touches this Session concurrently during this request.
-    return await asyncio.to_thread(_process_webhook_sync, db, event)
+    return await asyncio.to_thread(_process_webhook_sync, event)
 
 
 @router.get("/payments/{payment_id}", response_model=PaymentOut)
@@ -298,4 +349,3 @@ def refund(
     return RefundResponse(
         payment_id=result.payment_id, refund_id=result.refund_id, refund_amount_paise=result.refund_amount_paise
     )
-

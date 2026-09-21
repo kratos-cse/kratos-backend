@@ -2,13 +2,8 @@
 notification, in that order. The route handler is responsible for the
 admin authorization check — this function assumes it has already been done.
 
-Linked-entity states are grounded in the real enum values confirmed against
-the finalized schema (app/models/enums.py): RegistrationStatus.CANCELLED,
-TeamStatus.CANCELLED, TeamMemberStatus.REMOVED. What's still worth a
-one-line confirmation with the registrations/teams owners before this ships
-is the *cascading* behavior for a TEAM_REGISTRATION refund — this only
-flips the team's own status, it does not also touch any members who are
-already ACTIVE.
+Row-level locking (`with_for_update`) ensures concurrent refund calls queue
+and serialize, preventing duplicate remote refunds at the payment gateway.
 """
 import uuid
 from dataclasses import dataclass
@@ -21,7 +16,7 @@ from app.models.enums import PaymentStatus, PaymentType, RegistrationStatus, Tea
 from app.models.external_mirrors import Registration, Team, TeamMember
 from app.models.payment import Payment
 from app.services.handoffs import send_notification
-from app.services.razorpay_client import get_razorpay, with_retry
+from app.services.razorpay_client import get_razorpay
 
 
 class RefundError(Exception):
@@ -38,7 +33,11 @@ class RefundResult:
 
 
 def refund_payment(db: Session, payment_id: uuid.UUID, reason: str) -> RefundResult:
-    payment = db.execute(select(Payment).where(Payment.id == payment_id)).scalar_one_or_none()
+    # Lock row to prevent concurrent duplicate remote refund calls
+    payment = db.execute(
+        select(Payment).where(Payment.id == payment_id).with_for_update()
+    ).scalar_one_or_none()
+
     if payment is None:
         raise RefundError(f"Payment {payment_id} not found", status=404)
     if payment.status != PaymentStatus.PAID.value:
@@ -46,13 +45,16 @@ def refund_payment(db: Session, payment_id: uuid.UUID, reason: str) -> RefundRes
     if not payment.razorpay_payment_id:
         raise RefundError(f"Payment {payment_id} has no razorpay_payment_id to refund", status=409)
 
-    # 1. Razorpay refund.
-    refund = with_retry(
-        lambda: get_razorpay().payment.refund(payment.razorpay_payment_id, {"amount": payment.amount_paise})
-    )
+    # 1. Razorpay refund (invoked directly without blind retry).
+    try:
+        refund = get_razorpay().payment.refund(
+            payment.razorpay_payment_id, {"amount": payment.amount_paise}
+        )
+    except Exception as err:
+        db.rollback()
+        raise RefundError(f"Razorpay refund failed: {err}", status=502)
 
-    # 2. payments row. Conditional on still being PAID, mirroring the idempotency
-    # guard in payment_apply.py — a duplicate refund click cannot double-apply.
+    # 2. Update payments row.
     updated_payment = db.execute(
         update(Payment)
         .where(Payment.id == payment_id, Payment.status == PaymentStatus.PAID.value)
@@ -68,9 +70,6 @@ def refund_payment(db: Session, payment_id: uuid.UUID, reason: str) -> RefundRes
 
     if updated_payment is None:
         db.rollback()
-        # The Razorpay refund already succeeded even though our row didn't flip (a
-        # concurrent refund attempt beat us to it) — surface this loudly rather than
-        # silently swallowing a real refund that isn't reflected in our records.
         raise RefundError(
             f"Razorpay refund {refund['id']} succeeded but payments row update failed for {payment_id} — "
             "reconcile manually",

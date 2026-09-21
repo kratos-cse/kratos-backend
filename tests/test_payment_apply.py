@@ -31,6 +31,7 @@ class StubStore:
             payer_profile_id=kwargs.get("payer_profile_id", uuid.uuid4()),
             amount_paise=kwargs.get("amount_paise", 50000),
         )
+        self.solo_registration_id = kwargs.get("registration_id", uuid.uuid4())
         self.confirm_calls = {"solo": 0, "team": 0, "topup": 0}
         self.committed = False
         self.rolled_back = False
@@ -41,8 +42,9 @@ class StubStore:
         self.status = patch_data["status"]
         return self.payment
 
-    def confirm_solo_registration(self, payment_id: uuid.UUID) -> None:
+    def confirm_solo_registration(self, payment_id: uuid.UUID) -> Optional[uuid.UUID]:
         self.confirm_calls["solo"] += 1
+        return self.solo_registration_id
 
     def confirm_team_registration(self, payment_id: uuid.UUID) -> None:
         self.confirm_calls["team"] += 1
@@ -70,7 +72,8 @@ class TestApplyPaymentSuccessIdempotency:
         assert store.confirm_calls["solo"] == 1
         assert store.committed is True
         send_notif.assert_called_once()
-        trigger_qr.assert_called_once()
+        # Verifies Finding 13: trigger_qr receives the actual registration ID, not payment ID
+        trigger_qr.assert_called_once_with(registration_id=store.solo_registration_id)
         issue_receipt.assert_called_once()
 
     def test_duplicate_call_is_a_noop(self):

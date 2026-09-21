@@ -22,6 +22,18 @@ class Settings(BaseSettings):
     # when the webhook URL is registered. NOT the same as RAZORPAY_KEY_SECRET.
     RAZORPAY_WEBHOOK_SECRET: str = ""
 
+    @property
+    def is_local_or_test_env(self) -> bool:
+        return self.ENVIRONMENT.lower() in ("development", "test", "local")
+
+    @property
+    def has_checkout_secret(self) -> bool:
+        return bool(self.RAZORPAY_KEY_SECRET and self.RAZORPAY_KEY_SECRET.strip())
+
+    @property
+    def has_webhook_secret(self) -> bool:
+        return bool(self.RAZORPAY_WEBHOOK_SECRET and self.RAZORPAY_WEBHOOK_SECRET.strip())
+
 
 @lru_cache
 def get_settings() -> Settings:

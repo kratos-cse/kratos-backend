@@ -26,6 +26,15 @@ class TestVerifyCheckoutSignature:
         signature = _sign_checkout(self.order_id, self.payment_id, "wrong_secret")
         assert verify_checkout_signature(self.order_id, self.payment_id, signature, self.key_secret) is False
 
+    def test_rejects_empty_secret_fails_closed(self):
+        empty_key_sig = _sign_checkout(self.order_id, self.payment_id, "")
+        assert verify_checkout_signature(self.order_id, self.payment_id, empty_key_sig, "") is False
+        assert verify_checkout_signature(self.order_id, self.payment_id, empty_key_sig, "   ") is False
+
+    def test_rejects_empty_signature(self):
+        assert verify_checkout_signature(self.order_id, self.payment_id, "", self.key_secret) is False
+        assert verify_checkout_signature(self.order_id, self.payment_id, "   ", self.key_secret) is False
+
     def test_rejects_tampered_payment_id(self):
         signature = _sign_checkout(self.order_id, "pay_TAMPERED", self.key_secret)
         assert verify_checkout_signature(self.order_id, self.payment_id, signature, self.key_secret) is False
@@ -41,6 +50,16 @@ class TestVerifyWebhookSignature:
     def test_accepts_signature_over_exact_raw_body(self):
         signature = _sign_bytes(self.raw_body, self.webhook_secret)
         assert verify_webhook_signature(self.raw_body, signature, self.webhook_secret) is True
+
+    def test_rejects_empty_secret_fails_closed(self):
+        empty_key_sig = _sign_bytes(self.raw_body, "")
+        assert verify_webhook_signature(self.raw_body, empty_key_sig, "") is False
+        assert verify_webhook_signature(self.raw_body, empty_key_sig, "   ") is False
+
+    def test_rejects_empty_signature_or_empty_body(self):
+        signature = _sign_bytes(self.raw_body, self.webhook_secret)
+        assert verify_webhook_signature(self.raw_body, "", self.webhook_secret) is False
+        assert verify_webhook_signature(b"", signature, self.webhook_secret) is False
 
     def test_rejects_signature_over_reparsed_reserialized_body(self):
         reparsed = json.loads(self.raw_body)

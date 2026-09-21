@@ -42,7 +42,7 @@ class PaymentsStore(Protocol):
         self, payment_id: uuid.UUID, from_statuses: list[str], patch: dict
     ) -> Optional[Payment]: ...
 
-    def confirm_solo_registration(self, payment_id: uuid.UUID) -> None: ...
+    def confirm_solo_registration(self, payment_id: uuid.UUID) -> Optional[uuid.UUID]: ...
 
     def confirm_team_registration(self, payment_id: uuid.UUID) -> None: ...
 
@@ -70,10 +70,14 @@ class SqlAlchemyPaymentsStore:
         )
         return result.scalar_one_or_none()
 
-    def confirm_solo_registration(self, payment_id: uuid.UUID) -> None:
-        self.db.execute(
-            update(Registration).where(Registration.payment_id == payment_id).values(status=RegistrationStatus.CONFIRMED.value)
+    def confirm_solo_registration(self, payment_id: uuid.UUID) -> Optional[uuid.UUID]:
+        result = self.db.execute(
+            update(Registration)
+            .where(Registration.payment_id == payment_id)
+            .values(status=RegistrationStatus.CONFIRMED.value)
+            .returning(Registration.id)
         )
+        return result.scalar_one_or_none()
 
     def confirm_team_registration(self, payment_id: uuid.UUID) -> None:
         team_id = self.db.execute(select(Registration.team_id).where(Registration.payment_id == payment_id)).scalar_one_or_none()
@@ -103,11 +107,11 @@ class SqlAlchemyPaymentsStore:
         self.db.rollback()
 
 
-def _run_handoffs(payment: Payment) -> None:
+def _run_handoffs(payment: Payment, registration_id: Optional[uuid.UUID] = None) -> None:
     from app.services.handoffs import issue_receipt, send_notification, trigger_qr
 
-    if payment.payment_type == PaymentType.SOLO_REGISTRATION.value:
-        trigger_qr(registration_id=payment.id)
+    if payment.payment_type == PaymentType.SOLO_REGISTRATION.value and registration_id:
+        trigger_qr(registration_id=registration_id)
     elif payment.payment_type == PaymentType.TEAM_MEMBER_TOPUP.value and payment.team_member_id:
         trigger_qr(team_member_id=payment.team_member_id)
     # TEAM_REGISTRATION does not issue a QR by itself — joining members get theirs
@@ -127,8 +131,9 @@ def apply_payment_success(store: PaymentsStore, payment_id: uuid.UUID, razorpay_
         store.rollback()
         return ApplyResult(applied=False, payment=None)
 
+    registration_id: Optional[uuid.UUID] = None
     if payment.payment_type == PaymentType.SOLO_REGISTRATION.value:
-        store.confirm_solo_registration(payment.id)
+        registration_id = store.confirm_solo_registration(payment.id)
     elif payment.payment_type == PaymentType.TEAM_REGISTRATION.value:
         store.confirm_team_registration(payment.id)
     elif payment.payment_type == PaymentType.TEAM_MEMBER_TOPUP.value:
@@ -137,7 +142,7 @@ def apply_payment_success(store: PaymentsStore, payment_id: uuid.UUID, razorpay_
         store.confirm_team_member_topup(payment.team_member_id)
 
     store.commit()
-    _run_handoffs(payment)
+    _run_handoffs(payment, registration_id=registration_id)
     return ApplyResult(applied=True, payment=payment)
 
 

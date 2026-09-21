@@ -57,11 +57,28 @@ class TestRefundPayment:
         assert exc_info.value.status == 409
         assert "has no razorpay_payment_id" in str(exc_info.value)
 
+    def test_razorpay_api_failure_raises_502_and_rolls_back(self):
+        db = MagicMock()
+        payment = FakePayment(status=PaymentStatus.PAID.value, razorpay_payment_id="pay_123", amount_paise=50000)
+        select_mock = MagicMock()
+        select_mock.scalar_one_or_none.return_value = payment
+        db.execute.return_value = select_mock
+
+        fake_client = MagicMock()
+        fake_client.payment.refund.side_effect = RuntimeError("Network timeout")
+
+        with patch("app.services.refund.get_razorpay", return_value=fake_client):
+            with pytest.raises(RefundError) as exc_info:
+                refund_payment(db, payment.id, "User requested refund")
+
+        assert exc_info.value.status == 502
+        db.rollback.assert_called_once()
+
     def test_successful_refund(self):
         db = MagicMock()
         payment = FakePayment(status=PaymentStatus.PAID.value, razorpay_payment_id="pay_123", amount_paise=50000)
 
-        # 1st execute: select Payment
+        # 1st execute: select Payment (with_for_update)
         # 2nd execute: update Payment returning
         # 3rd execute: update Registration
         select_mock = MagicMock()
