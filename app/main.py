@@ -14,10 +14,14 @@ app = FastAPI(
     description=(
         "KRATOS'26 backend under /api/v1: Auth, Profile, Events, Registration, "
         "Teams, Payments (solo + team-leader only), QR, Receipts, Notifications (SMTP), "
-        "Attendance, and Admin. Team members never pay. "
-        "Deferred: WebSocket teams, multi-event cart."
+        "Attendance, and Admin. Team members never pay.\n\n"
+        "**To test admin routes in Swagger:**\n"
+        "1. Call `POST /api/v1/auth/dev-token` with your `user_id` to get a JWT.\n"
+        "2. Click the **Authorize 🔒** button at the top and paste the token.\n"
+        "3. All admin endpoints will now work."
     ),
     version="0.1.0",
+    swagger_ui_parameters={"persistAuthorization": True},
 )
 
 app.add_middleware(

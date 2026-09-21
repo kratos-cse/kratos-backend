@@ -1,11 +1,14 @@
 from datetime import datetime, timezone
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import bearer_scheme, create_access_token, decode_token, get_current_profile, get_current_user, revoke_token
+from app.core.config import settings
 from app.db.session import get_db
 from app.models.profile import Profile
 from app.models.user import User
@@ -77,3 +80,75 @@ async def logout(
     payload = decode_token(credentials.credentials)
     revoke_token(payload["jti"])
     return None
+
+
+# ── Dev / Testing helpers ─────────────────────────────────────────────────────
+# These endpoints are disabled in ENVIRONMENT=production automatically.
+
+class DevTokenRequest(BaseModel):
+    user_id: UUID
+
+
+def _assert_dev_mode():
+    """Raise 404 if running in production — dev endpoints must not be accessible."""
+    if settings.ENVIRONMENT == "production":
+        raise HTTPException(status_code=404, detail="Not found")
+
+
+@router.post(
+    "/dev-token",
+    tags=["Dev / Testing"],
+    summary="[DEV ONLY] Issue a JWT for any existing user_id",
+    description=(
+        "**For Swagger testing only — disabled in production.** "
+        "Provide any `user_id` from the `users` table "
+        "and receive a valid JWT you can paste into the 🔒 Authorize button.\n\n"
+        "Steps:\n"
+        "1. Call `GET /api/v1/auth/users` to list existing users and grab a `user_id`.\n"
+        "2. Call this endpoint with that `user_id` to get the token.\n"
+        "3. Click **Authorize** at the top of /docs and enter: `Bearer <token>`."
+    ),
+)
+async def dev_token(body: DevTokenRequest, db: AsyncSession = Depends(get_db)):
+    _assert_dev_mode()
+    result = await db.execute(select(User).where(User.id == body.user_id))
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found. Run `python scripts/seed_admin.py` or POST /auth/google first.",
+        )
+    token, expires_in = create_access_token(user.id)
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "expires_in": expires_in,
+        "user_id": str(user.id),
+        "email": user.email,
+        "is_admin_flagged": user.is_admin_flagged,
+        "hint": "Paste 'Bearer <token>' in the Authorize button above",
+    }
+
+
+@router.get(
+    "/users",
+    tags=["Dev / Testing"],
+    summary="[DEV ONLY] List all registered users",
+    description="Returns all user rows — disabled in production.",
+)
+async def list_users(db: AsyncSession = Depends(get_db)):
+    _assert_dev_mode()
+    result = await db.execute(select(User).order_by(User.created_at.desc()).limit(50))
+    users = result.scalars().all()
+    return {
+        "total": len(users),
+        "users": [
+            {
+                "user_id": str(u.id),
+                "email": u.email,
+                "is_admin_flagged": u.is_admin_flagged,
+                "created_at": u.created_at,
+            }
+            for u in users
+        ],
+    }

@@ -12,7 +12,9 @@ instead of silently accepting unverified tokens.
 from dataclasses import dataclass
 
 from fastapi import HTTPException, status
+# pyrefly: ignore [missing-import]
 from google.auth.transport import requests as google_requests
+# pyrefly: ignore [missing-import]
 from google.oauth2 import id_token as google_id_token
 
 from app.core.config import settings
