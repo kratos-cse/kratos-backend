@@ -1,16 +1,17 @@
 """Fires a signed payment.captured webhook at a locally running dev server
-twice, to prove idempotency end-to-end over real HTTP (not just the unit-level
-stub in tests/test_apply_idempotency.py). Also fires one with a mangled
-signature.
+twice, to prove idempotency end-to-end over real HTTP (not just the
+unit-level stub in tests/test_payment_apply.py). Also fires one with a
+mangled signature.
 
 Usage:
     RAZORPAY_WEBHOOK_SECRET=whatever_you_set_locally ORDER_ID=order_xxx \
         python scripts/simulate_webhook.py
 
 ORDER_ID must already exist in your local `payments` table (create it via
-POST /payments/create-order first) or the webhook will 200 with
-"unknown order" and applied:false both times -- that is a correctly-handled
-no-op, not a failure of this script.
+POST /api/v1/payments/create-order first, which needs a real DATABASE_URL
+and a valid session) or the webhook will 200 with "unknown order" and
+applied:false both times -- that is a correctly-handled no-op, not a
+failure of this script.
 """
 import hashlib
 import hmac
@@ -51,7 +52,7 @@ def sign(payload: bytes, secret: str) -> str:
 
 def post(payload: bytes, signature: str) -> None:
     req = urllib.request.Request(
-        f"{base}/payments/webhook",
+        f"{base}/api/v1/payments/webhook",
         data=payload,
         method="POST",
         headers={"content-type": "application/json", "x-razorpay-signature": signature},

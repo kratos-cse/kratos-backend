@@ -2,7 +2,7 @@ import hashlib
 import hmac
 import json
 
-from app.payments.signatures import verify_checkout_signature, verify_webhook_signature
+from app.services.signatures import verify_checkout_signature, verify_webhook_signature
 
 
 def _sign_checkout(order_id: str, payment_id: str, secret: str) -> str:
@@ -44,8 +44,7 @@ class TestVerifyWebhookSignature:
 
     def test_rejects_signature_over_reparsed_reserialized_body(self):
         # This is exactly the mistake the brief warns about: hash the raw body,
-        # not a parsed-then-restringified one. Key order in the re-dump is not
-        # guaranteed to match the original wire bytes.
+        # not a parsed-then-restringified one.
         reparsed = json.loads(self.raw_body)
         reserialized = json.dumps({"payload": reparsed["payload"], "event": reparsed["event"]}).encode()
         signature = _sign_bytes(reserialized, self.webhook_secret)
