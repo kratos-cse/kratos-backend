@@ -120,14 +120,14 @@ def upgrade() -> None:
     op.execute(
         sa.text(
             "INSERT INTO roles (id, name, description) VALUES "
-            "(:id, 'SUPER ADMIN', 'Full system access — seeded by migration 0003')"
+            "(CAST(:id AS UUID), 'SUPER ADMIN', 'Full system access — seeded by migration 0003')"
         ).bindparams(id=SUPER_ADMIN_ROLE_ID)
     )
     for key in SUPER_ADMIN_PERMISSIONS:
         op.execute(
             sa.text(
                 "INSERT INTO permissions (id, role_id, permission_key) VALUES "
-                "(:id, :role_id, :key)"
+                "(CAST(:id AS UUID), CAST(:role_id AS UUID), :key)"
             ).bindparams(id=str(uuid.uuid4()), role_id=SUPER_ADMIN_ROLE_ID, key=key)
         )
 
