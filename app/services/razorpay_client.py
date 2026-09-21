@@ -4,6 +4,9 @@ Razorpay enforces per-minute API rate limits. Retry transient failures (5xx,
 and a 429 rate limit — which the SDK raises as a BadRequestError since it's
 < 500, distinguished here by message) with exponential backoff instead of
 failing a user's registration outright on a momentary limit hit.
+
+Plain sync calls: routes that use this are sync `def` handlers, which
+FastAPI already runs in a worker thread, so there's no event loop to block.
 """
 import time
 from typing import Callable, TypeVar
@@ -11,7 +14,7 @@ from typing import Callable, TypeVar
 import razorpay
 from razorpay.errors import BadRequestError, GatewayError, ServerError
 
-from .env import env
+from app.core.config import settings
 
 T = TypeVar("T")
 
@@ -21,7 +24,7 @@ _client: razorpay.Client | None = None
 def get_razorpay() -> razorpay.Client:
     global _client
     if _client is None:
-        _client = razorpay.Client(auth=(env("RAZORPAY_KEY_ID"), env("RAZORPAY_KEY_SECRET")))
+        _client = razorpay.Client(auth=(settings.RAZORPAY_KEY_ID, settings.RAZORPAY_KEY_SECRET))
     return _client
 
 

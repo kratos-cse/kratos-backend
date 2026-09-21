@@ -1,9 +1,9 @@
 from fastapi import FastAPI
 
-from app.payments.routes import router as payments_router
+from app.api.v1.payments import router as payments_router
 
 app = FastAPI(
-    title="Kratos API",
+    title="Kratos Payments API",
     version="0.1.0",
 )
 

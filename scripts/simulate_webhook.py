@@ -1,7 +1,5 @@
 """Fires a signed payment.captured webhook at a locally running dev server
-twice, to prove idempotency end-to-end over real HTTP (not just the unit-level
-stub in tests/test_apply_idempotency.py). Also fires one with a mangled
-signature.
+twice, to prove idempotency end-to-end over real HTTP. Also fires one with a mangled signature.
 
 Usage:
     RAZORPAY_WEBHOOK_SECRET=whatever_you_set_locally ORDER_ID=order_xxx \
