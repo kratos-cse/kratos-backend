@@ -1,62 +1,88 @@
 import uuid
+from datetime import datetime
+from typing import List, Optional
 
-from sqlalchemy import Boolean, Column, DateTime, Enum as SAEnum, ForeignKey, String
+from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Index, String, text, func
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import relationship
-from sqlalchemy.sql import func
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.core.database import Base
-from app.core.enums import TeamMemberRole, TeamMemberStatus, TeamStatus
+from app.db.base import Base
+from app.models.enums import TeamMemberRole, TeamMemberStatus, TeamStatus
 
 
 class Team(Base):
     __tablename__ = "teams"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    event_id = Column(UUID(as_uuid=True), ForeignKey("events.id"), nullable=False)
-    name = Column(String, nullable=False)
-    leader_profile_id = Column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=False)
-    status = Column(SAEnum(TeamStatus, name="team_status"), nullable=False, default=TeamStatus.FORMING)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    event_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("events.id"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    leader_profile_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=False, index=True
+    )
+    status: Mapped[TeamStatus] = mapped_column(
+        Enum(TeamStatus, name="team_status"), default=TeamStatus.FORMING, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    members = relationship("TeamMember", back_populates="team", cascade="all, delete-orphan")
-    invitations = relationship("TeamInvitation", back_populates="team", cascade="all, delete-orphan")
+    members: Mapped[List["TeamMember"]] = relationship("TeamMember", back_populates="team")
+    invitations: Mapped[List["TeamInvitation"]] = relationship("TeamInvitation", back_populates="team")
 
 
 class TeamMember(Base):
+    """
+    Partial unique indexes (non-terminal event membership + one active leader)
+    are defined in Alembic 0003 — LEFT/REMOVED history is preserved.
+    """
+
     __tablename__ = "team_members"
-
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    team_id = Column(UUID(as_uuid=True), ForeignKey("teams.id"), nullable=False)
-    event_id = Column(UUID(as_uuid=True), ForeignKey("events.id"), nullable=False)
-    profile_id = Column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=False)
-    role = Column(SAEnum(TeamMemberRole, name="team_member_role"), nullable=False)
-    status = Column(
-        SAEnum(TeamMemberStatus, name="team_member_status"),
-        nullable=False,
-        default=TeamMemberStatus.PENDING_PAYMENT,
+    __table_args__ = (
+        Index("ix_team_members_team_id", "team_id"),
+        Index("ix_team_members_event_id", "event_id"),
+        Index("ix_team_members_profile_id", "profile_id"),
+        Index(
+            "uq_team_members_event_profile_active",
+            "event_id",
+            "profile_id",
+            unique=True,
+            postgresql_where=text("status NOT IN ('LEFT', 'REMOVED')"),
+        ),
+        Index(
+            "uq_team_members_one_active_leader",
+            "team_id",
+            unique=True,
+            postgresql_where=text("role = 'LEADER' AND status NOT IN ('LEFT', 'REMOVED')"),
+        ),
     )
-    joined_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    team = relationship("Team", back_populates="members")
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    team_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("teams.id"), nullable=False)
+    event_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("events.id"), nullable=False)
+    profile_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=False)
+    role: Mapped[TeamMemberRole] = mapped_column(Enum(TeamMemberRole, name="team_member_role"), nullable=False)
+    status: Mapped[TeamMemberStatus] = mapped_column(
+        Enum(TeamMemberStatus, name="team_member_status"),
+        default=TeamMemberStatus.PENDING_PAYMENT,
+        nullable=False,
+    )
+    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    # NOTE: the two partial-unique constraints from the schema
-    # (UNIQUE(event_id, profile_id) among non-terminal rows, and one
-    # active LEADER per team) are defined as raw-SQL partial indexes
-    # in db/migrations/0001_teams_module.sql instead of here, because
-    # SQLAlchemy's declarative __table_args__ can't cleanly express a
-    # WHERE-filtered unique index across dialects. Apply that
-    # migration - the ORM alone will NOT enforce these two rules.
+    team: Mapped["Team"] = relationship("Team", back_populates="members")
 
 
 class TeamInvitation(Base):
+    """Reusable, non-expiring invitation until is_active is set False."""
+
     __tablename__ = "team_invitations"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    team_id = Column(UUID(as_uuid=True), ForeignKey("teams.id"), nullable=False)
-    code = Column(String, unique=True, nullable=False, index=True)
-    is_active = Column(Boolean, nullable=False, default=True)
-    created_by_profile_id = Column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    team_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("teams.id"), nullable=False, index=True
+    )
+    code: Mapped[str] = mapped_column(String, unique=True, nullable=False, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    created_by_profile_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    team = relationship("Team", back_populates="invitations")
+    team: Mapped[Optional["Team"]] = relationship("Team", back_populates="invitations")

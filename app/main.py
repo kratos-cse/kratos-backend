@@ -1,25 +1,69 @@
-from fastapi import FastAPI
-from app.api.v1 import team_invitations, team_members, teams
-from app.core.database import Base, engine
-from app.models import team as _team_models       
-from app.models import temp_external_subs as _stub_models
+from pathlib import Path
 
-# Create the database tables
-Base.metadata.create_all(bind=engine)
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+from app.api.v1.router import api_router
+from app.core.config import settings
+from app.core.errors import FORBIDDEN, NOT_FOUND, VALIDATION_ERROR, AppError
 
 app = FastAPI(
-    title="Kratos API",
+    title="KRATOS'26 API",
+    description=(
+        "KRATOS'26 backend under /api/v1: Auth, Profile, Events, Registration, "
+        "Teams, Payments (solo + team-leader only), QR, Receipts, Notifications (SMTP), "
+        "Attendance, and Admin. Team members never pay. "
+        "Deferred: WebSocket teams, multi-event cart."
+    ),
     version="0.1.0",
 )
-app.include_router(teams.router, prefix="/api/v1")
-app.include_router(team_members.router,prefix="/api/v1")
-app.include_router(team_invitations.router,prefix="/api/v1")
 
-@app.get("/")
-def root():
-    return {"message": "Kratos API is running"}
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(api_router, prefix="/api/v1")
+
+_receipt_dir = Path(settings.RECEIPT_STORAGE_DIR)
+_receipt_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/media/receipts", StaticFiles(directory=str(_receipt_dir)), name="receipts")
 
 
-@app.get("/health")
-def health():
+@app.exception_handler(AppError)
+async def app_error_handler(_request: Request, exc: AppError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": {"code": exc.code, "message": exc.message}},
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONResponse:
+    if exc.status_code == 403:
+        code = FORBIDDEN
+    elif exc.status_code == 404:
+        code = NOT_FOUND
+    else:
+        code = VALIDATION_ERROR
+    detail = exc.detail
+    if isinstance(detail, str):
+        message = detail
+    elif isinstance(detail, list):
+        message = str(detail)
+    else:
+        message = str(detail)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": {"code": code, "message": message}},
+    )
+
+
+@app.get("/health", tags=["Health"])
+async def health_check():
     return {"status": "ok"}

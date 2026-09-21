@@ -1,0 +1,25 @@
+"""Application errors with stable codes for API clients."""
+
+EVENT_CLOSED = "EVENT_CLOSED"
+CAPACITY_FULL = "CAPACITY_FULL"
+TEAM_FULL = "TEAM_FULL"
+ALREADY_REGISTERED = "ALREADY_REGISTERED"
+ALREADY_MEMBER = "ALREADY_MEMBER"
+INVITE_REVOKED = "INVITE_REVOKED"
+PAYMENT_REQUIRED = "PAYMENT_REQUIRED"
+PAYMENT_FAILED = "PAYMENT_FAILED"
+PAYMENT_ALREADY_PROCESSED = "PAYMENT_ALREADY_PROCESSED"
+INVALID_QR = "INVALID_QR"
+DUPLICATE_SCAN = "DUPLICATE_SCAN"
+FORBIDDEN = "FORBIDDEN"
+NOT_FOUND = "NOT_FOUND"
+VALIDATION_ERROR = "VALIDATION_ERROR"
+MEMBER_PAYMENT_NOT_ALLOWED = "MEMBER_PAYMENT_NOT_ALLOWED"
+
+
+class AppError(Exception):
+    def __init__(self, code: str, message: str, status_code: int = 400) -> None:
+        self.code = code
+        self.message = message
+        self.status_code = status_code
+        super().__init__(message)

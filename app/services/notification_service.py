@@ -1,147 +1,398 @@
-"""
-Email notifications triggered by Team actions (member joined, team full).
-
-Ownership note: it isn't settled yet whether Notifications becomes a
-shared module everyone calls into, or each module keeps its own
-triggers like this. Either way, the three PUBLIC function signatures
-below are the contract - if a shared module lands later, gut this
-file's internals and keep the signatures the same, so team_service.py
-never has to change its call sites.
-
-Dry-run by default (EMAIL_DRY_RUN=true): nothing is actually sent,
-everything is logged instead - safe to test without real SMTP creds.
-
-Future-proofing built in now:
-- _send() accepts an optional html_body - pass it once you have real
-  HTML templates (e.g. the QR-code confirmation emails in the
-  diagram), and it'll send a proper multipart/alternative email
-  (plain-text fallback + HTML) instead of plain text only.
-- _send() accepts an optional list of attachments - use this for the
-  QR code image once that's generated (likely by the Check-in module
-  - confirm ownership before building QR generation here).
-- Template rendering isn't wired up yet (no Jinja2), so the three
-  public functions below still build plain strings inline. When real
-  HTML templates exist, put them under app/templates/emails/*.html
-  and render with Jinja2 inside each public function, passing the
-  result as html_body to _send() - the call sites in team_service.py
-  won't need to change.
-"""
+"""Email notifications via SMTP (aiosmtplib). SMTP failures never propagate to callers."""
 import logging
-import mimetypes
-import os
-from email.mime.application import MIMEApplication
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+from datetime import datetime, timezone
+from email.message import EmailMessage
+from typing import Any, Optional
+from uuid import UUID
 
-import smtplib
-from dotenv import load_dotenv
+import aiosmtplib
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
-load_dotenv()  # safe to call again even though database.py already does it
+from app.core.config import settings
+from app.models.enums import (
+    NotificationKind,
+    NotificationStatus,
+    RegistrationStatus,
+    TeamMemberStatus,
+    TeamStatus,
+)
+from app.models.event import Event
+from app.models.notification import Notification
+from app.models.payment import Payment
+from app.models.profile import Profile
+from app.models.registration import Registration
+from app.models.team import Team, TeamMember
+from app.models.user import User
+from app.services import qr_service
 
-logger = logging.getLogger("notifications")
+logger = logging.getLogger("notification_service")
 
-SMTP_HOST = os.getenv("SMTP_HOST")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
-FROM_EMAIL = os.getenv("FROM_EMAIL", "no-reply@kratos26.events")
-DRY_RUN = os.getenv("EMAIL_DRY_RUN", "true").lower() == "true"
 
-print(SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, FROM_EMAIL, DRY_RUN)
+async def _resolve_email(db: AsyncSession, profile_id: UUID) -> Optional[str]:
+    result = await db.execute(
+        select(Profile)
+        .options(selectinload(Profile.user))
+        .where(Profile.id == profile_id)
+    )
+    profile = result.scalar_one_or_none()
+    if not profile:
+        return None
+    if profile.contact_email:
+        return profile.contact_email
+    if profile.user:
+        return profile.user.email
+    return None
 
-def _send(
-    to_email: str,
-    subject: str,
-    text_body: str,
-    html_body: str | None = None,
-    attachments: list[tuple[str, bytes]] | None = None,
-) -> None:
-    """
-    text_body: always required - plain-text fallback, also what gets
-        logged in dry-run mode.
-    html_body: optional - pass rendered HTML once templates exist.
-        When given, the email becomes multipart/alternative and most
-        mail clients will render this instead of text_body.
-    attachments: optional list of (filename, raw_bytes) tuples, e.g.
-        [("registration_qr.png", qr_bytes)]. Mime type is guessed
-        from the filename extension.
-    """
-    if DRY_RUN or not SMTP_HOST:
-        logger.info(
-            "[DRY RUN EMAIL] To: %s | Subject: %s%s%s\n%s",
-            to_email,
-            subject,
-            " | +HTML body" if html_body else "",
-            f" | +{len(attachments)} attachment(s)" if attachments else "",
-            text_body,
-        )
-        return
 
-    root = MIMEMultipart("mixed") if attachments else MIMEMultipart("alternative")
-    root["From"] = FROM_EMAIL
-    root["To"] = to_email
-    root["Subject"] = subject
+async def _send_smtp(to_email: str, subject: str, body: str) -> tuple[bool, Optional[str]]:
+    if not settings.SMTP_HOST or not settings.SMTP_FROM:
+        return False, "SMTP not configured (SMTP_HOST / SMTP_FROM missing)"
 
-    if attachments:
-        # mixed root needs its own alternative sub-part for text/html
-        alt = MIMEMultipart("alternative")
-        alt.attach(MIMEText(text_body, "plain"))
-        if html_body:
-            alt.attach(MIMEText(html_body, "html"))
-        root.attach(alt)
-
-        for filename, raw_bytes in attachments:
-            mime_type, _ = mimetypes.guess_type(filename)
-            part = MIMEApplication(raw_bytes, Name=filename)
-            if mime_type:
-                part.add_header("Content-Type", mime_type)
-            part.add_header("Content-Disposition", "attachment", filename=filename)
-            root.attach(part)
-    else:
-        root.attach(MIMEText(text_body, "plain"))
-        if html_body:
-            root.attach(MIMEText(html_body, "html"))
+    message = EmailMessage()
+    message["From"] = settings.SMTP_FROM
+    message["To"] = to_email
+    message["Subject"] = subject
+    message.set_content(body)
 
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.sendmail(FROM_EMAIL, [to_email], root.as_string())
-    except Exception:
-        # Never let an email failure break the join/registration
-        # transaction that already committed - log and move on.
-        logger.exception("Failed to send email to %s", to_email)
+        await aiosmtplib.send(
+            message,
+            hostname=settings.SMTP_HOST,
+            port=settings.SMTP_PORT,
+            username=settings.SMTP_USER or None,
+            password=settings.SMTP_PASSWORD or None,
+            start_tls=settings.SMTP_TLS,
+        )
+        return True, None
+    except Exception as exc:
+        logger.exception("SMTP send failed to=%s subject=%s", to_email, subject)
+        return False, str(exc)
 
 
-def send_member_confirmation(to_email: str, member_name: str, team_name: str, event_name: str) -> None:
-    subject = f"You're in! Confirmed for {team_name} - {event_name}"
-    body = (
-        f"Hi {member_name},\n\n"
-        f"You've successfully joined \"{team_name}\" for {event_name}.\n"
-        f"Your team leader can now see you on the roster.\n\n"
-        f"See you at the event!"
+async def create_and_send(
+    db: AsyncSession,
+    profile_id: UUID,
+    kind: NotificationKind,
+    subject: str,
+    body: str,
+    *,
+    channel: str = "EMAIL",
+    payload: Optional[dict[str, Any]] = None,
+    payment_id: Optional[UUID] = None,
+    registration_id: Optional[UUID] = None,
+    team_id: Optional[UUID] = None,
+) -> Notification:
+    notification = Notification(
+        profile_id=profile_id,
+        kind=kind,
+        channel=channel,
+        status=NotificationStatus.PENDING,
+        subject=subject,
+        body=body,
+        payload=payload,
+        payment_id=payment_id,
+        registration_id=registration_id,
+        team_id=team_id,
     )
-    # TODO: once a QR-code image is available (likely generated by the
-    # Check-in module), pass it as attachments=[("qr.png", qr_bytes)]
-    # and a rendered HTML template as html_body.
-    _send(to_email, subject, body)
+    db.add(notification)
+    await db.flush()
+
+    to_email = await _resolve_email(db, profile_id)
+    if not to_email:
+        notification.status = NotificationStatus.FAILED
+        notification.error = "No contact email for profile"
+        await db.commit()
+        return notification
+
+    ok, err = await _send_smtp(to_email, subject, body)
+    if ok:
+        notification.status = NotificationStatus.SENT
+        notification.sent_at = datetime.now(timezone.utc)
+        notification.error = None
+    else:
+        notification.status = NotificationStatus.FAILED
+        notification.error = err
+
+    await db.commit()
+    return notification
 
 
-def notify_leader_member_joined(to_email: str, leader_name: str, member_name: str, team_name: str) -> None:
-    subject = f"{member_name} joined \"{team_name}\""
+async def resend(db: AsyncSession, notification_id: UUID) -> Notification:
+    result = await db.execute(select(Notification).where(Notification.id == notification_id))
+    notification = result.scalar_one_or_none()
+    if notification is None:
+        raise ValueError(f"Notification {notification_id} not found")
+
+    notification.status = NotificationStatus.PENDING
+    notification.error = None
+    notification.sent_at = None
+    await db.flush()
+
+    to_email = await _resolve_email(db, notification.profile_id)
+    if not to_email:
+        notification.status = NotificationStatus.FAILED
+        notification.error = "No contact email for profile"
+        await db.commit()
+        return notification
+
+    ok, err = await _send_smtp(to_email, notification.subject, notification.body)
+    if ok:
+        notification.status = NotificationStatus.SENT
+        notification.sent_at = datetime.now(timezone.utc)
+        notification.error = None
+    else:
+        notification.status = NotificationStatus.FAILED
+        notification.error = err
+
+    await db.commit()
+    return notification
+
+
+def _amount_inr(paise: int) -> str:
+    return f"₹{paise / 100:.2f}"
+
+
+async def notify_payment_confirmed(db: AsyncSession, payment_id: UUID) -> None:
+    result = await db.execute(select(Payment).where(Payment.id == payment_id))
+    payment = result.scalar_one_or_none()
+    if not payment:
+        logger.warning("notify_payment_confirmed: payment %s not found", payment_id)
+        return
+
+    reg_result = await db.execute(select(Registration).where(Registration.payment_id == payment_id))
+    registration = reg_result.scalar_one_or_none()
+    event_name = "your event"
+    registration_id: Optional[UUID] = None
+    team_id: Optional[UUID] = None
+
+    if registration:
+        registration_id = registration.id
+        team_id = registration.team_id
+        ev = await db.execute(select(Event).where(Event.id == registration.event_id))
+        event = ev.scalar_one_or_none()
+        if event:
+            event_name = event.name
+
+    subject = f"Payment confirmed — {event_name}"
     body = (
-        f"Hi {leader_name},\n\n"
-        f"{member_name} just joined your team \"{team_name}\".\n"
-        f"Check your team roster for the latest headcount."
+        f"Your payment of {_amount_inr(payment.amount_paise)} for {event_name} has been received.\n\n"
+        f"Your registration is confirmed. Sign in to KRATOS to view your QR code for check-in.\n"
+        f"{settings.APP_PUBLIC_BASE_URL}\n"
     )
-    _send(to_email, subject, body)
+    await create_and_send(
+        db,
+        payment.payer_profile_id,
+        NotificationKind.PAYMENT_CONFIRMATION,
+        subject,
+        body,
+        payment_id=payment_id,
+        registration_id=registration_id,
+        team_id=team_id,
+        payload={"amount_paise": payment.amount_paise},
+    )
 
 
-def send_team_completed(to_email: str, leader_name: str, team_name: str) -> None:
-    subject = f"Your team \"{team_name}\" is full!"
+async def notify_member_joined(
+    db: AsyncSession,
+    *,
+    leader_profile_id: UUID,
+    team_id: UUID,
+    member_profile_id: UUID,
+    event_id: UUID,
+) -> None:
+    member_res = await db.execute(select(Profile).where(Profile.id == member_profile_id))
+    member = member_res.scalar_one_or_none()
+    team_res = await db.execute(select(Team).where(Team.id == team_id))
+    team = team_res.scalar_one_or_none()
+    ev_res = await db.execute(select(Event).where(Event.id == event_id))
+    event = ev_res.scalar_one_or_none()
+
+    member_name = member.full_name if member else "A member"
+    team_name = team.name if team else "your team"
+    event_name = event.name if event else "the event"
+
+    subject = f"{member_name} joined {team_name}"
     body = (
-        f"Hi {leader_name},\n\n"
-        f"Great news - \"{team_name}\" has reached full capacity. "
-        f"Your team registration is now complete."
+        f"{member_name} has joined {team_name} for {event_name}.\n\n"
+        f"View your team in the KRATOS app.\n{settings.APP_PUBLIC_BASE_URL}\n"
     )
-    _send(to_email, subject, body)
+    await create_and_send(
+        db,
+        leader_profile_id,
+        NotificationKind.MEMBER_JOINED,
+        subject,
+        body,
+        team_id=team_id,
+        payload={"member_profile_id": str(member_profile_id)},
+    )
+
+
+async def notify_member_confirmation(db: AsyncSession, team_member_id: UUID) -> None:
+    tm_res = await db.execute(select(TeamMember).where(TeamMember.id == team_member_id))
+    member = tm_res.scalar_one_or_none()
+    if not member:
+        return
+
+    team_res = await db.execute(select(Team).where(Team.id == member.team_id))
+    team = team_res.scalar_one_or_none()
+    ev_res = await db.execute(select(Event).where(Event.id == member.event_id))
+    event = ev_res.scalar_one_or_none()
+
+    from app.models.qr_code import QRCode
+
+    qr_res = await db.execute(select(QRCode).where(QRCode.team_member_id == team_member_id, QRCode.is_active.is_(True)))
+    qr = qr_res.scalar_one_or_none()
+
+    event_name = event.name if event else "the event"
+    team_name = team.name if team else "your team"
+    wa = event.whatsapp_group_link if event and event.whatsapp_group_link else ""
+
+    subject = f"You're registered — {event_name}"
+    body_lines = [
+        f"You have joined {team_name} for {event_name}.",
+        "",
+        "Your individual QR code is available in the KRATOS app for event check-in.",
+        settings.APP_PUBLIC_BASE_URL,
+    ]
+    if qr:
+        body_lines.extend(["", f"QR token (for scanners): {qr.token}"])
+    if wa:
+        body_lines.extend(["", f"Event WhatsApp group: {wa}"])
+    body = "\n".join(body_lines) + "\n"
+
+    await create_and_send(
+        db,
+        member.profile_id,
+        NotificationKind.MEMBER_CONFIRMATION,
+        subject,
+        body,
+        team_id=member.team_id,
+        payload={"team_member_id": str(team_member_id)},
+    )
+
+
+async def notify_team_completed(db: AsyncSession, leader_profile_id: UUID, team_id: UUID) -> None:
+    team_res = await db.execute(select(Team).where(Team.id == team_id))
+    team = team_res.scalar_one_or_none()
+    if not team:
+        return
+    ev_res = await db.execute(select(Event).where(Event.id == team.event_id))
+    event = ev_res.scalar_one_or_none()
+
+    event_name = event.name if event else "the event"
+    team_name = team.name if team else "Your team"
+
+    subject = f"{team_name} is complete — {event_name}"
+    body = (
+        f"Great news! {team_name} has reached the required size for {event_name}.\n\n"
+        f"{settings.APP_PUBLIC_BASE_URL}\n"
+    )
+    await create_and_send(
+        db,
+        leader_profile_id,
+        NotificationKind.TEAM_COMPLETED,
+        subject,
+        body,
+        team_id=team_id,
+    )
+
+
+async def notify_refund(
+    db: AsyncSession,
+    payment_id: UUID,
+    *,
+    reason: Optional[str] = None,
+    amount_paise: Optional[int] = None,
+) -> None:
+    result = await db.execute(select(Payment).where(Payment.id == payment_id))
+    payment = result.scalar_one_or_none()
+    if not payment:
+        return
+
+    amount = amount_paise if amount_paise is not None else payment.amount_paise
+    subject = "Refund processed — KRATOS"
+    body = f"A refund of {_amount_inr(amount)} has been issued to your original payment method.\n"
+    if reason:
+        body += f"\nReason: {reason}\n"
+
+    await create_and_send(
+        db,
+        payment.payer_profile_id,
+        NotificationKind.REFUND,
+        subject,
+        body,
+        payment_id=payment_id,
+        payload={"reason": reason, "amount_paise": amount},
+    )
+
+
+async def _eligible_event_profile_ids(db: AsyncSession, event_id: UUID) -> set[UUID]:
+    profile_ids: set[UUID] = set()
+
+    solo_regs = await db.execute(
+        select(Registration).where(
+            Registration.event_id == event_id,
+            Registration.profile_id.isnot(None),
+            Registration.status == RegistrationStatus.CONFIRMED,
+        )
+    )
+    for reg in solo_regs.scalars().all():
+        if reg.profile_id:
+            profile_ids.add(reg.profile_id)
+
+    members = await db.execute(
+        select(TeamMember)
+        .join(Team, TeamMember.team_id == Team.id)
+        .where(
+            TeamMember.event_id == event_id,
+            TeamMember.status == TeamMemberStatus.ACTIVE,
+            Team.status.in_([TeamStatus.PAID, TeamStatus.COMPLETE]),
+        )
+    )
+    for tm in members.scalars().all():
+        profile_ids.add(tm.profile_id)
+    return profile_ids
+
+
+async def send_announcement(
+    db: AsyncSession,
+    event_id: UUID,
+    subject: str,
+    body: str,
+) -> list[Notification]:
+    profile_ids = await _eligible_event_profile_ids(db, event_id)
+    sent: list[Notification] = []
+    for pid in profile_ids:
+        n = await create_and_send(
+            db,
+            pid,
+            NotificationKind.ANNOUNCEMENT,
+            subject,
+            body,
+            payload={"event_id": str(event_id)},
+        )
+        sent.append(n)
+    return sent
+
+
+async def send_reminder(
+    db: AsyncSession,
+    event_id: UUID,
+    subject: str,
+    body: str,
+) -> list[Notification]:
+    profile_ids = await _eligible_event_profile_ids(db, event_id)
+    sent: list[Notification] = []
+    for pid in profile_ids:
+        n = await create_and_send(
+            db,
+            pid,
+            NotificationKind.REMINDER,
+            subject,
+            body,
+            payload={"event_id": str(event_id)},
+        )
+        sent.append(n)
+    return sent

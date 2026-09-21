@@ -3,24 +3,16 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.core.enums import TeamMemberRole, TeamMemberStatus, TeamStatus
+from app.models.enums import TeamMemberRole, TeamMemberStatus, TeamStatus
 
-
-# ---------- Requests ----------
 
 class TeamCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=200)
 
 
 class TeamUpdateRequest(BaseModel):
-    # Only fields an owner/admin may edit via PATCH /teams/{id}.
-    # status is deliberately excluded - status transitions are
-    # internal-only (payment, capacity, admin actions), never
-    # client-supplied.
     name: str | None = Field(default=None, min_length=1, max_length=200)
 
-
-# ---------- Responses ----------
 
 class TeamMemberOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -31,7 +23,7 @@ class TeamMemberOut(BaseModel):
     role: TeamMemberRole
     status: TeamMemberStatus
     joined_at: datetime
-    full_name: str | None = None  # filled in by the service from PROFILES
+    full_name: str | None = None
 
 
 class TeamOut(BaseModel):
@@ -62,9 +54,6 @@ class InvitationOut(BaseModel):
 
 
 class InvitationPublicOut(BaseModel):
-    """Returned by the public GET /team-invitations/{code} - deliberately
-    excludes anything sensitive (no emails/phones)."""
-
     team_id: uuid.UUID
     team_name: str
     event_id: uuid.UUID
@@ -79,4 +68,3 @@ class InvitationPublicOut(BaseModel):
 class JoinTeamResponse(BaseModel):
     team: TeamOut
     member: TeamMemberOut
-    requires_payment: bool  # True when fee_charge_model is PER_MEMBER
