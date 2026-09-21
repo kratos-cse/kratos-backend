@@ -1,0 +1,147 @@
+"""
+Email notifications triggered by Team actions (member joined, team full).
+
+Ownership note: it isn't settled yet whether Notifications becomes a
+shared module everyone calls into, or each module keeps its own
+triggers like this. Either way, the three PUBLIC function signatures
+below are the contract - if a shared module lands later, gut this
+file's internals and keep the signatures the same, so team_service.py
+never has to change its call sites.
+
+Dry-run by default (EMAIL_DRY_RUN=true): nothing is actually sent,
+everything is logged instead - safe to test without real SMTP creds.
+
+Future-proofing built in now:
+- _send() accepts an optional html_body - pass it once you have real
+  HTML templates (e.g. the QR-code confirmation emails in the
+  diagram), and it'll send a proper multipart/alternative email
+  (plain-text fallback + HTML) instead of plain text only.
+- _send() accepts an optional list of attachments - use this for the
+  QR code image once that's generated (likely by the Check-in module
+  - confirm ownership before building QR generation here).
+- Template rendering isn't wired up yet (no Jinja2), so the three
+  public functions below still build plain strings inline. When real
+  HTML templates exist, put them under app/templates/emails/*.html
+  and render with Jinja2 inside each public function, passing the
+  result as html_body to _send() - the call sites in team_service.py
+  won't need to change.
+"""
+import logging
+import mimetypes
+import os
+from email.mime.application import MIMEApplication
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
+import smtplib
+from dotenv import load_dotenv
+
+load_dotenv()  # safe to call again even though database.py already does it
+
+logger = logging.getLogger("notifications")
+
+SMTP_HOST = os.getenv("SMTP_HOST")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+FROM_EMAIL = os.getenv("FROM_EMAIL", "no-reply@kratos26.events")
+DRY_RUN = os.getenv("EMAIL_DRY_RUN", "true").lower() == "true"
+
+print(SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, FROM_EMAIL, DRY_RUN)
+
+def _send(
+    to_email: str,
+    subject: str,
+    text_body: str,
+    html_body: str | None = None,
+    attachments: list[tuple[str, bytes]] | None = None,
+) -> None:
+    """
+    text_body: always required - plain-text fallback, also what gets
+        logged in dry-run mode.
+    html_body: optional - pass rendered HTML once templates exist.
+        When given, the email becomes multipart/alternative and most
+        mail clients will render this instead of text_body.
+    attachments: optional list of (filename, raw_bytes) tuples, e.g.
+        [("registration_qr.png", qr_bytes)]. Mime type is guessed
+        from the filename extension.
+    """
+    if DRY_RUN or not SMTP_HOST:
+        logger.info(
+            "[DRY RUN EMAIL] To: %s | Subject: %s%s%s\n%s",
+            to_email,
+            subject,
+            " | +HTML body" if html_body else "",
+            f" | +{len(attachments)} attachment(s)" if attachments else "",
+            text_body,
+        )
+        return
+
+    root = MIMEMultipart("mixed") if attachments else MIMEMultipart("alternative")
+    root["From"] = FROM_EMAIL
+    root["To"] = to_email
+    root["Subject"] = subject
+
+    if attachments:
+        # mixed root needs its own alternative sub-part for text/html
+        alt = MIMEMultipart("alternative")
+        alt.attach(MIMEText(text_body, "plain"))
+        if html_body:
+            alt.attach(MIMEText(html_body, "html"))
+        root.attach(alt)
+
+        for filename, raw_bytes in attachments:
+            mime_type, _ = mimetypes.guess_type(filename)
+            part = MIMEApplication(raw_bytes, Name=filename)
+            if mime_type:
+                part.add_header("Content-Type", mime_type)
+            part.add_header("Content-Disposition", "attachment", filename=filename)
+            root.attach(part)
+    else:
+        root.attach(MIMEText(text_body, "plain"))
+        if html_body:
+            root.attach(MIMEText(html_body, "html"))
+
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(FROM_EMAIL, [to_email], root.as_string())
+    except Exception:
+        # Never let an email failure break the join/registration
+        # transaction that already committed - log and move on.
+        logger.exception("Failed to send email to %s", to_email)
+
+
+def send_member_confirmation(to_email: str, member_name: str, team_name: str, event_name: str) -> None:
+    subject = f"You're in! Confirmed for {team_name} - {event_name}"
+    body = (
+        f"Hi {member_name},\n\n"
+        f"You've successfully joined \"{team_name}\" for {event_name}.\n"
+        f"Your team leader can now see you on the roster.\n\n"
+        f"See you at the event!"
+    )
+    # TODO: once a QR-code image is available (likely generated by the
+    # Check-in module), pass it as attachments=[("qr.png", qr_bytes)]
+    # and a rendered HTML template as html_body.
+    _send(to_email, subject, body)
+
+
+def notify_leader_member_joined(to_email: str, leader_name: str, member_name: str, team_name: str) -> None:
+    subject = f"{member_name} joined \"{team_name}\""
+    body = (
+        f"Hi {leader_name},\n\n"
+        f"{member_name} just joined your team \"{team_name}\".\n"
+        f"Check your team roster for the latest headcount."
+    )
+    _send(to_email, subject, body)
+
+
+def send_team_completed(to_email: str, leader_name: str, team_name: str) -> None:
+    subject = f"Your team \"{team_name}\" is full!"
+    body = (
+        f"Hi {leader_name},\n\n"
+        f"Great news - \"{team_name}\" has reached full capacity. "
+        f"Your team registration is now complete."
+    )
+    _send(to_email, subject, body)

@@ -25,6 +25,7 @@ from app.core.enums import FeeChargeModel, TeamMemberRole, TeamMemberStatus, Tea
 from app.models.temp_external_subs import Event, EventRegistrationRules, Profile  # TODO: swap for real models
 from app.models.team import Team, TeamInvitation, TeamMember
 from app.schemas.team import TeamCreateRequest, TeamUpdateRequest
+from app.services import notification_service
 
 
 # ---------------------------------------------------------------------
@@ -284,7 +285,7 @@ def join_via_invitation(db: Session, invite_code: str, profile: Profile) -> dict
         .filter(Team.id == invitation.team_id)
         .with_for_update()
         .first()
-    )
+    )   
     if not team:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Team not found")
     if team.status == TeamStatus.CANCELLED:
@@ -348,8 +349,48 @@ def join_via_invitation(db: Session, invite_code: str, profile: Profile) -> dict
     db.refresh(member)
     db.refresh(team)
 
-    # TODO: notification_service.send_member_confirmation(member)
-    # TODO: notification_service.notify_leader_member_joined(team, member)
+
+    new_active_count = _active_member_count(db, team.id)
+    just_completed = new_active_count >= rules.team_max_size and team.status != TeamStatus.CANCELLED
+    if just_completed:
+        team.status = TeamStatus.COMPLETE
+
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "Could not join team - please retry")
+
+    db.refresh(member)
+    db.refresh(team)
+
+    # Fire-and-forget style: emails never roll back the transaction
+    # above (it already committed), and notification_service itself
+    # swallows send failures rather than raising - see its _send().
+    event = db.query(Event).filter(Event.id == team.event_id).first()
+    leader = db.query(Profile).filter(Profile.id == team.leader_profile_id).first()
+    event_name = event.name if event else ""
+
+    notification_service.send_member_confirmation(
+        to_email=profile.email if hasattr(profile, "email") else "",
+        member_name=getattr(profile, "full_name", "Team Member"),
+        team_name=team.name,
+        event_name=event_name,
+    )
+    if leader:
+        notification_service.notify_leader_member_joined(
+            to_email=leader.email,
+            leader_name=leader.full_name,
+            member_name=getattr(profile, "full_name", "A new member"),
+            team_name=team.name,
+        )
+        if just_completed:
+            notification_service.send_team_completed(
+                to_email=leader.email,
+                leader_name=leader.full_name,
+                team_name=team.name,
+            )
+
 
     return {
         "team": team,
