@@ -25,7 +25,7 @@ from app.schemas.payment import (
 )
 from app.services.amounts import compute_amount_paise
 from app.services.payment_apply import SqlAlchemyPaymentsStore, apply_payment_failure, apply_payment_success
-from app.services.razorpay_client import get_razorpay
+from app.services.razorpay_client import get_razorpay, with_retry
 from app.services.refund import RefundError, refund_payment
 from app.services.signatures import verify_checkout_signature, verify_webhook_signature
 
@@ -125,13 +125,19 @@ def create_order(
 
     receipt = f"kratos26_{uuid.uuid4().hex[:16]}"
     try:
-        order = get_razorpay().order.create(
-            {
-                "amount": amount_paise,
-                "currency": "INR",
-                "receipt": receipt,
-                "notes": {"payment_type": payment_type.value, "event_id": str(event.id)},
-            }
+        # with_retry only retries responses that prove Razorpay rejected the
+        # call (5xx/429) — a rate-limit hit shouldn't fail the user's
+        # registration outright (brief §3). A timeout or other ambiguous
+        # failure is not retried, to avoid risking a duplicate order.
+        order = with_retry(
+            lambda: get_razorpay().order.create(
+                {
+                    "amount": amount_paise,
+                    "currency": "INR",
+                    "receipt": receipt,
+                    "notes": {"payment_type": payment_type.value, "event_id": str(event.id)},
+                }
+            )
         )
     except Exception as err:
         db.rollback()
