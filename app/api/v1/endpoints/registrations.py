@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_profile, get_current_user
 from app.db.session import get_db
+from app.models.enums import PaymentStatus
 from app.models.profile import Profile
 from app.models.qr_code import QRCode
 from app.models.receipt import Receipt
@@ -14,6 +15,7 @@ from app.models.user import User
 from app.schemas.registration import QRCodeOut, ReceiptOut, RegistrationCreateRequest, RegistrationOut
 from app.services.registration_service import (
     assert_can_view_registration,
+    cancel_unpaid_registration,
     create_registration,
     get_registration_or_404,
     list_my_registrations,
@@ -51,7 +53,34 @@ async def get_registration(
 ):
     registration = await get_registration_or_404(db, registration_id)
     await assert_can_view_registration(db, registration, profile, current_user.is_admin_flagged)
+
+    if registration.payment and registration.payment.status == PaymentStatus.CREATED:
+        from app.api.v1.endpoints.payments import _sync_payment_if_needed
+
+        await _sync_payment_if_needed(db, registration.payment)
+        registration = await get_registration_or_404(db, registration_id)
+
     return registration
+
+
+@router.post("/registrations/{registration_id}/cancel", response_model=RegistrationOut)
+async def cancel_registration(
+    registration_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    profile: Profile = Depends(get_current_profile),
+):
+    """
+    Cancel an unpaid registration. Allows participants (or team leaders) to
+    cancel a pending registration and free up their slot so they can re-register.
+    """
+    return await cancel_unpaid_registration(
+        db,
+        registration_id=registration_id,
+        profile=profile,
+        is_admin=current_user.is_admin_flagged,
+    )
+
 
 
 @router.get("/users/me/registrations", response_model=list[RegistrationOut])

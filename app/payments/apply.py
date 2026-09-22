@@ -71,7 +71,10 @@ async def transition_payment_status(
 async def confirm_solo_registration(db: AsyncSession, payment_id: UUID) -> None:
     await db.execute(
         update(Registration)
-        .where(Registration.payment_id == payment_id)
+        .where(
+            Registration.payment_id == payment_id,
+            Registration.status != RegistrationStatus.CANCELLED,
+        )
         .values(status=RegistrationStatus.CONFIRMED)
     )
 
@@ -88,6 +91,9 @@ async def confirm_team_registration(db: AsyncSession, payment_id: UUID, payer_pr
             f"confirm_team_registration: no team registration linked to payment {payment_id}"
         )
 
+    if registration.status == RegistrationStatus.CANCELLED:
+        return
+
     await db.execute(
         update(Team).where(Team.id == registration.team_id).values(status=TeamStatus.PAID)
     )
@@ -102,7 +108,10 @@ async def confirm_team_registration(db: AsyncSession, payment_id: UUID, payer_pr
     )
     await db.execute(
         update(Registration)
-        .where(Registration.id == registration.id)
+        .where(
+            Registration.id == registration.id,
+            Registration.status != RegistrationStatus.CANCELLED,
+        )
         .values(status=RegistrationStatus.CONFIRMED)
     )
 

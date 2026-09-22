@@ -68,3 +68,5 @@ class InvitationPublicOut(BaseModel):
 class JoinTeamResponse(BaseModel):
     team: TeamOut
     member: TeamMemberOut
+    registration_id: uuid.UUID | None = None
+
