@@ -780,8 +780,14 @@ async def ensure_receipt(db: AsyncSession, payment_id: uuid.UUID) -> Receipt:
     rendered_html = render_html_receipt(context)
     html_path.write_text(rendered_html, encoding="utf-8")
 
-    # Set public URL pointing directly to the HTML receipt view
-    receipt_url = f"{settings.APP_PUBLIC_BASE_URL.rstrip('/')}/media/receipts/{html_filename}"
+    # Set authenticated URL pointing to the registration receipt endpoint
+    reg_result = await db.execute(select(Registration.id).where(Registration.payment_id == payment_id))
+    reg_id = reg_result.scalar_one_or_none()
+    if reg_id:
+        receipt_url = f"{settings.APP_PUBLIC_BASE_URL.rstrip('/')}/api/v1/registrations/{reg_id}/receipt/html"
+    else:
+        receipt_url = f"{settings.APP_PUBLIC_BASE_URL.rstrip('/')}/api/v1/registrations/{payment_id}/receipt/html"
+
     receipt = Receipt(
         payment_id=payment_id,
         receipt_number=receipt_number,

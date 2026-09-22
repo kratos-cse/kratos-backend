@@ -3,7 +3,6 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 
 from app.api.v1.router import api_router
 from app.core.config import settings
@@ -30,9 +29,8 @@ app.add_middleware(
 
 app.include_router(api_router, prefix="/api/v1")
 
-_receipt_dir = Path(settings.RECEIPT_STORAGE_DIR)
-_receipt_dir.mkdir(parents=True, exist_ok=True)
-app.mount("/media/receipts", StaticFiles(directory=str(_receipt_dir)), name="receipts")
+# Ensure receipt storage directory exists for PDF / HTML persistence
+Path(settings.RECEIPT_STORAGE_DIR).mkdir(parents=True, exist_ok=True)
 
 
 @app.exception_handler(AppError)

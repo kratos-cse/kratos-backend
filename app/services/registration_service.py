@@ -29,8 +29,13 @@ _REGISTRATION_LOAD_OPTS = (
 )
 
 
-async def _get_event_with_rules(db: AsyncSession, event_id: uuid.UUID) -> tuple[Event, Optional[EventRegistrationRule]]:
-    result = await db.execute(select(Event).options(selectinload(Event.rules)).where(Event.id == event_id))
+async def _get_event_with_rules(
+    db: AsyncSession, event_id: uuid.UUID, for_update: bool = False
+) -> tuple[Event, Optional[EventRegistrationRule]]:
+    stmt = select(Event).options(selectinload(Event.rules)).where(Event.id == event_id)
+    if for_update:
+        stmt = stmt.with_for_update()
+    result = await db.execute(stmt)
     event = result.scalar_one_or_none()
     if event is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
@@ -64,7 +69,8 @@ async def create_registration(
     profile: Profile,
     payload: RegistrationCreateRequest,
 ) -> Registration:
-    event, rules = await _get_event_with_rules(db, event_id)
+    # Acquire a row lock on Event during capacity check and registration creation to prevent overcapacity races
+    event, rules = await _get_event_with_rules(db, event_id, for_update=True)
 
     if not is_registration_open(event, rules):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Registration is not open for this event")

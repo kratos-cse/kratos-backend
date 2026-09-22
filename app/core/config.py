@@ -11,6 +11,7 @@ verification will fail with a clear error until those are set.
 from functools import lru_cache
 from typing import List
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -30,6 +31,17 @@ class Settings(BaseSettings):
     JWT_SECRET_KEY: str = "dev-secret-change-me"
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
+
+    @field_validator("JWT_SECRET_KEY")
+    @classmethod
+    def validate_jwt_secret_key(cls, v: str, info) -> str:
+        env = str(info.data.get("ENVIRONMENT", "development")).strip().lower() if info.data else "development"
+        if env not in ("development", "test", "testing"):
+            if v == "dev-secret-change-me" or len(v.strip()) < 32:
+                raise ValueError(
+                    "Insecure JWT_SECRET_KEY: Non-development environments require a strong secret key of at least 32 characters."
+                )
+        return v
 
     # --- Razorpay ---
     RAZORPAY_KEY_ID: str = ""
