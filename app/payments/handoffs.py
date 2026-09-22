@@ -47,4 +47,10 @@ async def send_notification(
 
 
 async def issue_receipt(db: AsyncSession, payment_id: UUID) -> None:
-    await receipt_service.ensure_receipt(db, payment_id)
+    logger.info("receipt_generation_started payment_id=%s", payment_id)
+    try:
+        await receipt_service.ensure_receipt(db, payment_id)
+        logger.info("receipt_generation_succeeded payment_id=%s", payment_id)
+    except Exception:
+        logger.exception("receipt_generation_failed payment_id=%s", payment_id)
+        raise

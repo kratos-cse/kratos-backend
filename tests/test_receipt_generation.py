@@ -1,7 +1,14 @@
 import uuid
 from datetime import datetime, timezone
+
 from app.main import app
+from app.models.registration import Registration
 from app.services.receipt_service import generate_qr_svg, render_html_receipt
+
+
+def test_registration_model_exposes_event_relationship():
+    """Receipt service uses Registration.event — ORM must define it."""
+    assert "event" in Registration.__mapper__.relationships
 
 
 def test_receipt_routes_registered():

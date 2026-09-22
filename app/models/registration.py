@@ -47,5 +47,6 @@ class Registration(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    event: Mapped["Event"] = relationship("Event")
     team: Mapped[Optional["Team"]] = relationship("Team")
     payment: Mapped[Optional["Payment"]] = relationship("Payment")

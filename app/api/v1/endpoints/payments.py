@@ -65,6 +65,15 @@ async def _link_registration_payment(
             raise HTTPException(status_code=404, detail="Registration not found")
         if registration.event_id != event_id:
             raise HTTPException(status_code=400, detail="Registration does not belong to this event")
+        if registration.payment_id is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="Registration already has a payment attached",
+            )
+        if payment_type == PaymentType.TEAM_REGISTRATION and not registration.team_id:
+            raise HTTPException(status_code=400, detail="Registration is not a team registration")
+        if payment_type == PaymentType.SOLO_REGISTRATION and not registration.profile_id:
+            raise HTTPException(status_code=400, detail="Registration is not a solo registration")
     elif payment_type == PaymentType.SOLO_REGISTRATION:
         result = await db.execute(
             select(Registration).where(

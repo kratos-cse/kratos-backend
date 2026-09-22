@@ -1,4 +1,5 @@
 """Idempotent payment status transitions via async SQLAlchemy."""
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
@@ -13,6 +14,8 @@ from app.models.registration import Registration
 from app.models.team import Team, TeamMember
 from app.payments.handoffs import issue_receipt, trigger_qr
 from app.services import notification_service
+
+logger = logging.getLogger("payments.apply")
 
 
 @dataclass
@@ -79,19 +82,68 @@ async def confirm_solo_registration(db: AsyncSession, payment_id: UUID) -> None:
     )
 
 
+async def _resolve_team_registration(
+    db: AsyncSession, payment_id: UUID, payer_profile_id: UUID
+) -> Optional[Registration]:
+    """Find the team registration for a TEAM_REGISTRATION payment."""
+    linked = await db.execute(select(Registration).where(Registration.payment_id == payment_id))
+    registration = linked.scalar_one_or_none()
+    if registration and registration.team_id:
+        return registration
+
+    pending_result = await db.execute(
+        select(Registration)
+        .join(Team, Registration.team_id == Team.id)
+        .where(
+            Team.leader_profile_id == payer_profile_id,
+            Registration.team_id.isnot(None),
+            Registration.status == RegistrationStatus.PENDING,
+            Registration.payment_id.is_(None),
+        )
+    )
+    pending = list(pending_result.scalars().all())
+    if len(pending) == 1:
+        registration = pending[0]
+        registration.payment_id = payment_id
+        await db.flush()
+        logger.warning(
+            "team_registration_payment_link_recovered payment_id=%s registration_id=%s team_id=%s event_id=%s",
+            payment_id,
+            registration.id,
+            registration.team_id,
+            registration.event_id,
+        )
+        return registration
+
+    if len(pending) > 1:
+        logger.error(
+            "team_registration_payment_link_ambiguous payment_id=%s payer_profile_id=%s candidate_count=%s",
+            payment_id,
+            payer_profile_id,
+            len(pending),
+        )
+    return None
+
+
 async def confirm_team_registration(db: AsyncSession, payment_id: UUID, payer_profile_id: UUID) -> None:
     """Team registrations have team_id set and profile_id NULL (xor constraint)."""
-    result = await db.execute(
-        select(Registration).where(Registration.payment_id == payment_id)
-    )
-    registration = result.scalar_one_or_none()
+    registration = await _resolve_team_registration(db, payment_id, payer_profile_id)
     if not registration or not registration.team_id:
-        # Fallback: find FORMING team led by payer (create-order should have linked payment_id).
+        logger.error(
+            "team_registration_payment_unlinked payment_id=%s payer_profile_id=%s",
+            payment_id,
+            payer_profile_id,
+        )
         raise RuntimeError(
             f"confirm_team_registration: no team registration linked to payment {payment_id}"
         )
 
     if registration.status == RegistrationStatus.CANCELLED:
+        logger.warning(
+            "team_registration_confirm_skipped_cancelled payment_id=%s registration_id=%s",
+            payment_id,
+            registration.id,
+        )
         return
 
     await db.execute(
