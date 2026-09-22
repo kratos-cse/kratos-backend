@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
     admin,
+    admin_audit,
     admin_ops,
     attendance,
     auth,
@@ -23,6 +24,7 @@ api_router.include_router(teams.router)
 api_router.include_router(payments.router)
 api_router.include_router(admin.router)
 api_router.include_router(admin_ops.router)
+api_router.include_router(admin_audit.router)
 api_router.include_router(qr.router)
 api_router.include_router(notifications.router)
 api_router.include_router(attendance.router)

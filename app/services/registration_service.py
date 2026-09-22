@@ -24,6 +24,7 @@ from app.models.team import Team, TeamMember
 from app.schemas.registration import RegistrationCreateRequest, RegistrationType
 from app.services import qr_service
 from app.services.event_service import is_registration_open, spots_remaining
+from app.services import audit_service
 
 _REGISTRATION_LOAD_OPTS = (
     selectinload(Registration.team).selectinload(Team.members),
@@ -31,8 +32,13 @@ _REGISTRATION_LOAD_OPTS = (
 )
 
 
-async def _get_event_with_rules(db: AsyncSession, event_id: uuid.UUID) -> tuple[Event, Optional[EventRegistrationRule]]:
-    result = await db.execute(select(Event).options(selectinload(Event.rules)).where(Event.id == event_id))
+async def _get_event_with_rules(
+    db: AsyncSession, event_id: uuid.UUID, *, for_update: bool = False
+) -> tuple[Event, Optional[EventRegistrationRule]]:
+    stmt = select(Event).options(selectinload(Event.rules)).where(Event.id == event_id)
+    if for_update:
+        stmt = stmt.with_for_update()
+    result = await db.execute(stmt)
     event = result.scalar_one_or_none()
     if event is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
@@ -66,7 +72,7 @@ async def create_registration(
     profile: Profile,
     payload: RegistrationCreateRequest,
 ) -> Registration:
-    event, rules = await _get_event_with_rules(db, event_id)
+    event, rules = await _get_event_with_rules(db, event_id, for_update=True)
 
     if not is_registration_open(event, rules):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Registration is not open for this event")
@@ -141,6 +147,8 @@ async def assert_can_view_registration(
     if registration.profile_id == profile.id:
         return
     if registration.team_id is not None:
+        if registration.team and registration.team.leader_profile_id == profile.id:
+            return
         result = await db.execute(
             select(TeamMember).where(
                 TeamMember.team_id == registration.team_id,
@@ -248,5 +256,15 @@ async def cancel_unpaid_registration(
                 await qr_service.deactivate_for_team_member(db, member.id)
 
     await db.commit()
+    await audit_service.log_activity(
+        None,
+        action="REGISTRATION_CANCELLED",
+        resource_type="REGISTRATION",
+        resource_id=registration.id,
+        actor_user_id=profile.user_id,
+        actor_profile_id=profile.id,
+        actor_role="ADMIN" if is_admin else "PARTICIPANT",
+        details={"event_id": str(registration.event_id), "team_id": str(registration.team_id) if registration.team_id else None},
+    )
     return await get_registration_or_404(db, registration.id)
 
