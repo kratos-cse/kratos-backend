@@ -11,7 +11,11 @@ _FALLBACK_URL = "postgresql+asyncpg://user:pass@localhost:5432/kratos"
 
 engine = create_async_engine(
     settings.async_database_url or _FALLBACK_URL,
-    echo=settings.ENVIRONMENT == "development",
+    echo=False,
+    pool_size=20,
+    max_overflow=10,
+    pool_timeout=30,
+    pool_recycle=1800,
     pool_pre_ping=True,
     future=True,
 )

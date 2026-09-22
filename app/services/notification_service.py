@@ -1,4 +1,5 @@
 """Email notifications via SMTP (aiosmtplib). SMTP failures never propagate to callers."""
+import asyncio
 import logging
 from datetime import datetime, timezone
 from email.message import EmailMessage
@@ -71,6 +72,28 @@ async def _send_smtp(to_email: str, subject: str, body: str) -> tuple[bool, Opti
         return False, str(exc)
 
 
+async def _send_smtp_background(notification_id: UUID, to_email: str, subject: str, body: str) -> None:
+    """Sends email via SMTP asynchronously in the background and updates the notification record."""
+    ok, err = await _send_smtp(to_email, subject, body)
+    try:
+        from app.db.session import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as bg_db:
+            result = await bg_db.execute(select(Notification).where(Notification.id == notification_id))
+            notif = result.scalar_one_or_none()
+            if notif:
+                if ok:
+                    notif.status = NotificationStatus.SENT
+                    notif.sent_at = datetime.now(timezone.utc)
+                    notif.error = None
+                else:
+                    notif.status = NotificationStatus.FAILED
+                    notif.error = err
+                await bg_db.commit()
+    except Exception as exc:
+        logger.exception("Failed to update notification %s in background: %s", notification_id, exc)
+
+
 async def create_and_send(
     db: AsyncSession,
     profile_id: UUID,
@@ -106,16 +129,11 @@ async def create_and_send(
         await db.commit()
         return notification
 
-    ok, err = await _send_smtp(to_email, subject, body)
-    if ok:
-        notification.status = NotificationStatus.SENT
-        notification.sent_at = datetime.now(timezone.utc)
-        notification.error = None
-    else:
-        notification.status = NotificationStatus.FAILED
-        notification.error = err
-
+    # Commit initial PENDING record so ID exists in DB
     await db.commit()
+
+    # Dispatch email sending to background task — caller returns immediately without waiting for SMTP
+    asyncio.create_task(_send_smtp_background(notification.id, to_email, subject, body))
     return notification
 
 
@@ -137,16 +155,8 @@ async def resend(db: AsyncSession, notification_id: UUID) -> Notification:
         await db.commit()
         return notification
 
-    ok, err = await _send_smtp(to_email, notification.subject, notification.body)
-    if ok:
-        notification.status = NotificationStatus.SENT
-        notification.sent_at = datetime.now(timezone.utc)
-        notification.error = None
-    else:
-        notification.status = NotificationStatus.FAILED
-        notification.error = err
-
     await db.commit()
+    asyncio.create_task(_send_smtp_background(notification.id, to_email, notification.subject, notification.body))
     return notification
 
 
