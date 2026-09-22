@@ -54,6 +54,14 @@ class TeamStatus(str, enum.Enum):
 class TeamMemberRole(str, enum.Enum):
     LEADER = "LEADER"
     MEMBER = "MEMBER"
+    SUBSTITUTE = "SUBSTITUTE"
+
+
+class TeamMemberEntrySource(str, enum.Enum):
+    """How the roster seat was created."""
+
+    LINKED_ACCOUNT = "LINKED_ACCOUNT"
+    LEADER_ENTERED = "LEADER_ENTERED"
 
 
 class TeamMemberStatus(str, enum.Enum):

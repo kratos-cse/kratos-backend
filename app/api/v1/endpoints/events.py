@@ -62,6 +62,10 @@ async def list_events(db: AsyncSession = Depends(get_db)):
                 allow_individual=rules.allow_individual if rules else True,
                 team_min_size=rules.team_min_size if rules else 1,
                 team_max_size=rules.team_max_size if rules else 1,
+                required_member_count=getattr(rules, "required_member_count", None) or (rules.team_min_size if rules else 1),
+                substitute_count=getattr(rules, "substitute_count", None)
+                if rules and getattr(rules, "substitute_count", None) is not None
+                else max(0, (rules.team_max_size if rules else 1) - (rules.team_min_size if rules else 1)),
             )
         )
 
@@ -101,6 +105,12 @@ async def get_event(event_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         spots_remaining=remaining,
         team_min_size=rules.team_min_size if rules else 1,
         team_max_size=rules.team_max_size if rules else 1,
+        required_member_count=getattr(rules, "required_member_count", None) or (rules.team_min_size if rules else 1),
+        substitute_count=(
+            getattr(rules, "substitute_count", None)
+            if rules and getattr(rules, "substitute_count", None) is not None
+            else max(0, (rules.team_max_size if rules else 1) - (rules.team_min_size if rules else 1))
+        ),
         allow_individual=rules.allow_individual if rules else True,
         registration_mode=rules.registration_mode if rules else None,
         capacity_type=rules.capacity_type if rules else None,

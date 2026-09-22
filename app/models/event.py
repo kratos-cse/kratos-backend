@@ -60,6 +60,9 @@ class EventRegistrationRule(Base):
     )
     team_min_size: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
     team_max_size: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    # Explicit roster model (5+2 etc). team_min/max stay synced for legacy callers.
+    required_member_count: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    substitute_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     allow_individual: Mapped[bool] = mapped_column(default=True, server_default="true")
     registration_mode: Mapped[RegistrationMode] = mapped_column(
         Enum(RegistrationMode, name="registration_mode"),

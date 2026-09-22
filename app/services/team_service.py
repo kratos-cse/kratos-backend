@@ -1,5 +1,6 @@
 """
 Teams module (§5–§6). Async SQLAlchemy + real auth profile identity.
+Roster: mandatory members + optional substitutes (backend-enforced).
 """
 import secrets
 import uuid
@@ -11,11 +12,21 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.errors import ALREADY_REGISTERED, TEAM_FULL, AppError
+from app.core.errors import (
+    ALREADY_REGISTERED,
+    LEADER_ENTRY_NOT_ALLOWED,
+    ROSTER_INVALID,
+    TEAM_FULL,
+    TEAM_MANDATORY_FULL,
+    TEAM_SUBSTITUTE_LIMIT,
+    AppError,
+)
 from app.models.admin import AdminUser
 from app.models.enums import (
     EventStatus,
+    MemberRegistrationMode,
     RegistrationStatus,
+    TeamMemberEntrySource,
     TeamMemberRole,
     TeamMemberStatus,
     TeamStatus,
@@ -25,10 +36,19 @@ from app.models.event import Event, EventRegistrationRule
 from app.models.profile import Profile
 from app.models.registration import Registration
 from app.models.team import Team, TeamInvitation, TeamMember
-from app.schemas.team import TeamUpdateRequest
+from app.schemas.team import RosterAddRequest, TeamUpdateRequest
 from app.services.event_service import spots_remaining
+from app.services.roster_service import (
+    can_add_role,
+    count_mandatory,
+    count_substitutes,
+    mandatory_met,
+    next_join_role,
+    roster_limits,
+)
 
 _TERMINAL = (TeamMemberStatus.LEFT, TeamMemberStatus.REMOVED)
+_ACTIVE = (TeamMemberStatus.ACTIVE, TeamMemberStatus.PENDING_PAYMENT)
 
 
 async def _is_active_admin(db: AsyncSession, user_id: uuid.UUID | None) -> bool:
@@ -100,6 +120,7 @@ async def _require_leader_or_admin(db: AsyncSession, team: Team, profile: Profil
 
 async def _to_member_out(member: TeamMember) -> dict:
     profile = member.profile if "profile" in member.__dict__ else None
+    linked_name = profile.full_name if profile else None
     return {
         "id": member.id,
         "team_id": member.team_id,
@@ -107,7 +128,15 @@ async def _to_member_out(member: TeamMember) -> dict:
         "role": member.role,
         "status": member.status,
         "joined_at": member.joined_at,
-        "full_name": profile.full_name if profile else None,
+        "entry_source": getattr(member, "entry_source", TeamMemberEntrySource.LINKED_ACCOUNT),
+        "full_name": linked_name or getattr(member, "full_name", None),
+        "phone": getattr(member, "phone", None) or (profile.phone if profile else None),
+        "contact_email": getattr(member, "contact_email", None)
+        or (profile.contact_email if profile else None),
+        "college_name": getattr(member, "college_name", None)
+        or (profile.college_name if profile else None),
+        "year_of_study": getattr(member, "year_of_study", None)
+        or (profile.year_of_study if profile else None),
     }
 
 
@@ -120,8 +149,14 @@ async def _load_members_with_profiles(db: AsyncSession, team_id: uuid.UUID) -> l
     return list(result.scalars().all())
 
 
+def _active_members(members: list[TeamMember]) -> list[TeamMember]:
+    return [m for m in members if m.status in _ACTIVE]
+
+
 async def _to_detail(db: AsyncSession, team: Team, rules: EventRegistrationRule) -> dict:
     members = await _load_members_with_profiles(db, team.id)
+    active = _active_members(members)
+    required, max_subs, total = roster_limits(rules)
     return {
         "id": team.id,
         "event_id": team.event_id,
@@ -129,10 +164,12 @@ async def _to_detail(db: AsyncSession, team: Team, rules: EventRegistrationRule)
         "leader_profile_id": team.leader_profile_id,
         "status": team.status,
         "created_at": team.created_at,
-        "active_member_count": sum(
-            1 for m in members if m.status in (TeamMemberStatus.ACTIVE, TeamMemberStatus.PENDING_PAYMENT)
-        ),
-        "team_max_size": rules.team_max_size,
+        "active_member_count": len(active),
+        "team_max_size": total,
+        "required_member_count": required,
+        "substitute_count": max_subs,
+        "mandatory_filled": count_mandatory(active),
+        "substitutes_filled": count_substitutes(active),
         "members": [await _to_member_out(m) for m in members],
     }
 
@@ -146,7 +183,8 @@ async def create_team(db: AsyncSession, event_id: uuid.UUID, profile: Profile, n
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Registration is not open for this event")
 
     rules = await _get_rules_or_404(db, event_id)
-    if rules.team_max_size <= 1:
+    _, _, total = roster_limits(rules)
+    if total <= 1:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "This event does not support team registration")
 
     now = datetime.now(timezone.utc)
@@ -180,6 +218,7 @@ async def create_team(db: AsyncSession, event_id: uuid.UUID, profile: Profile, n
             profile_id=profile.id,
             role=TeamMemberRole.LEADER,
             status=TeamMemberStatus.PENDING_PAYMENT,
+            entry_source=TeamMemberEntrySource.LINKED_ACCOUNT,
         )
     )
     # Team registrations use team_id XOR profile_id — required so
@@ -272,6 +311,7 @@ async def get_invitation_public(db: AsyncSession, invite_code: str) -> dict:
     leader_result = await db.execute(select(Profile).where(Profile.id == team.leader_profile_id))
     leader = leader_result.scalar_one_or_none()
     active_count = await _active_member_count(db, team.id)
+    required, max_subs, total = roster_limits(rules)
 
     return {
         "team_id": team.id,
@@ -280,8 +320,10 @@ async def get_invitation_public(db: AsyncSession, invite_code: str) -> dict:
         "event_name": event.name if event else "",
         "leader_name": leader.full_name if leader else "",
         "active_member_count": active_count,
-        "team_max_size": rules.team_max_size,
-        "is_full": active_count >= rules.team_max_size,
+        "team_max_size": total,
+        "required_member_count": required,
+        "substitute_count": max_subs,
+        "is_full": active_count >= total,
         "is_active": invitation.is_active,
     }
 
@@ -308,6 +350,7 @@ async def join_via_invitation(db: AsyncSession, invite_code: str, profile: Profi
         )
 
     rules = await _get_rules_or_404(db, team.event_id)
+    _, _, total = roster_limits(rules)
 
     existing = await db.execute(
         select(TeamMember).where(
@@ -332,30 +375,38 @@ async def join_via_invitation(db: AsyncSession, invite_code: str, profile: Profi
             "registration_id": registration_id,
         }
 
-    active_count = await _active_member_count(db, team.id)
-    if active_count >= rules.team_max_size:
+    members = await _load_members_with_profiles(db, team.id)
+    active = _active_members(members)
+    if len(active) >= total:
         raise AppError(TEAM_FULL, "Team is full", status_code=409)
+
+    try:
+        role = next_join_role(active, rules)
+    except ValueError:
+        raise AppError(TEAM_FULL, "Team roster is full", status_code=409)
 
     member = TeamMember(
         team_id=team.id,
         event_id=team.event_id,
         profile_id=profile.id,
-        role=TeamMemberRole.MEMBER,
+        role=role,
         status=TeamMemberStatus.ACTIVE,
+        entry_source=TeamMemberEntrySource.LINKED_ACCOUNT,
     )
     db.add(member)
     await db.flush()
 
     # Re-check under the same FOR UPDATE lock after insert (concurrency safety).
-    new_active_count = await _active_member_count(db, team.id)
-    if new_active_count > rules.team_max_size:
+    members = await _load_members_with_profiles(db, team.id)
+    active = _active_members(members)
+    if len(active) > total:
         await db.rollback()
         raise AppError(TEAM_FULL, "Team is full", status_code=409)
 
     await qr_service.generate_for_team_member(db, member.id)
 
     team_became_complete = False
-    if new_active_count >= rules.team_max_size and team.status != TeamStatus.CANCELLED:
+    if mandatory_met(active, rules) and team.status == TeamStatus.PAID:
         team.status = TeamStatus.COMPLETE
         team_became_complete = True
 
@@ -400,6 +451,119 @@ async def join_via_invitation(db: AsyncSession, invite_code: str, profile: Profi
         "member": await _to_member_out(member),
         "registration_id": registration_id,
     }
+
+
+async def add_roster_member(
+    db: AsyncSession,
+    team_id: uuid.UUID,
+    profile: Profile,
+    payload: RosterAddRequest,
+) -> dict:
+    """Leader adds a mandatory member or substitute (linked account and/or details)."""
+    team_result = await db.execute(select(Team).where(Team.id == team_id).with_for_update())
+    team = team_result.scalar_one_or_none()
+    if not team:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Team not found")
+    await _require_leader_or_admin(db, team, profile)
+    if team.status == TeamStatus.CANCELLED:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cannot edit a cancelled team")
+
+    rules = await _get_rules_or_404(db, team.event_id)
+    role = payload.role
+
+    members = await _load_members_with_profiles(db, team.id)
+    active = _active_members(members)
+    required, max_subs, total = roster_limits(rules)
+
+    if len(active) >= total:
+        raise AppError(TEAM_FULL, "Team roster is full", status_code=409)
+
+    if not can_add_role(active, rules, role):
+        if role == TeamMemberRole.SUBSTITUTE:
+            raise AppError(TEAM_SUBSTITUTE_LIMIT, "No substitute slots remaining", status_code=409)
+        raise AppError(TEAM_MANDATORY_FULL, "Mandatory roster is already full", status_code=409)
+
+    entry_source = TeamMemberEntrySource.LEADER_ENTERED
+
+    if payload.profile_id:
+        entry_source = TeamMemberEntrySource.LINKED_ACCOUNT
+        pref = await db.execute(select(Profile).where(Profile.id == payload.profile_id))
+        if not pref.scalar_one_or_none():
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Profile not found")
+        existing = await db.execute(
+            select(TeamMember).where(
+                TeamMember.event_id == team.event_id,
+                TeamMember.profile_id == payload.profile_id,
+                TeamMember.status.notin_(_TERMINAL),
+            )
+        )
+        if existing.scalar_one_or_none():
+            raise AppError(ALREADY_REGISTERED, "That participant is already on a team for this event", status_code=409)
+    else:
+        if rules.member_registration_mode != MemberRegistrationMode.LEADER_MANAGED:
+            raise AppError(
+                LEADER_ENTRY_NOT_ALLOWED,
+                "This event requires members to register themselves",
+                status_code=400,
+            )
+        if not payload.full_name or not payload.phone:
+            raise AppError(ROSTER_INVALID, "full_name and phone are required for leader-entered members", status_code=400)
+
+    member = TeamMember(
+        team_id=team.id,
+        event_id=team.event_id,
+        profile_id=payload.profile_id,
+        role=role,
+        status=TeamMemberStatus.ACTIVE,
+        entry_source=entry_source,
+        full_name=payload.full_name if entry_source == TeamMemberEntrySource.LEADER_ENTERED else None,
+        phone=payload.phone if entry_source == TeamMemberEntrySource.LEADER_ENTERED else None,
+        contact_email=payload.contact_email if entry_source == TeamMemberEntrySource.LEADER_ENTERED else None,
+        college_name=payload.college_name if entry_source == TeamMemberEntrySource.LEADER_ENTERED else None,
+        year_of_study=payload.year_of_study if entry_source == TeamMemberEntrySource.LEADER_ENTERED else None,
+    )
+    db.add(member)
+    await db.flush()
+
+    members = await _load_members_with_profiles(db, team.id)
+    active = _active_members(members)
+    over_total = len(active) > total
+    over_subs = role == TeamMemberRole.SUBSTITUTE and count_substitutes(active) > max_subs
+    over_mandatory = role in (TeamMemberRole.MEMBER, TeamMemberRole.LEADER) and count_mandatory(active) > required
+    if over_total or over_subs or over_mandatory:
+        await db.rollback()
+        if role == TeamMemberRole.SUBSTITUTE:
+            raise AppError(TEAM_SUBSTITUTE_LIMIT, "No substitute slots remaining", status_code=409)
+        raise AppError(TEAM_MANDATORY_FULL, "Mandatory roster is already full", status_code=409)
+
+    if member.profile_id:
+        await qr_service.generate_for_team_member(db, member.id)
+
+    team_became_complete = False
+    if mandatory_met(active, rules) and team.status == TeamStatus.PAID:
+        team.status = TeamStatus.COMPLETE
+        team_became_complete = True
+
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise AppError(ALREADY_REGISTERED, "Could not add member - already registered", status_code=409)
+    except Exception:
+        await db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "Could not add roster member - please retry")
+
+    await db.refresh(member)
+    if member.profile_id:
+        await db.refresh(member, attribute_names=["profile"])
+
+    if team_became_complete:
+        try:
+            await notification_service.notify_team_completed(db, team.leader_profile_id, team.id)
+        except Exception:
+            pass
+
+    return await _to_detail(db, team, rules)
 
 
 async def leave_team(

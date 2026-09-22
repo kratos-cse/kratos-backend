@@ -35,6 +35,8 @@ class EventListItem(BaseModel):
     allow_individual: bool
     team_min_size: int
     team_max_size: int
+    required_member_count: int = 1
+    substitute_count: int = 0
 
 
 class EventDetail(BaseModel):
@@ -63,6 +65,8 @@ class EventDetail(BaseModel):
 
     team_min_size: int
     team_max_size: int
+    required_member_count: int = 1
+    substitute_count: int = 0
     allow_individual: bool
     registration_mode: RegistrationMode | None
     capacity_type: CapacityType | None

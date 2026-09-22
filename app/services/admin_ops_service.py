@@ -24,14 +24,16 @@ from app.models.profile import Profile
 from app.models.registration import Registration
 from app.models.team import Team, TeamMember
 from app.services import qr_service
+from app.services.roster_service import apply_roster_to_rules, sync_legacy_team_sizes
 
 
 def apply_registration_mode_to_rules(rules: EventRegistrationRule, mode: RegistrationMode) -> None:
     rules.registration_mode = mode
     if mode == RegistrationMode.INDIVIDUAL_ONLY:
         rules.allow_individual = True
-        rules.team_min_size = 1
-        rules.team_max_size = 1
+        rules.required_member_count = 1
+        rules.substitute_count = 0
+        sync_legacy_team_sizes(rules)
     elif mode == RegistrationMode.TEAM_ONLY:
         rules.allow_individual = False
     else:
@@ -104,6 +106,8 @@ def event_to_dict(event: Event, rules: EventRegistrationRule) -> dict[str, Any]:
             "registration_mode": rules.registration_mode,
             "team_min_size": rules.team_min_size,
             "team_max_size": rules.team_max_size,
+            "required_member_count": getattr(rules, "required_member_count", rules.team_min_size),
+            "substitute_count": getattr(rules, "substitute_count", max(0, rules.team_max_size - rules.team_min_size)),
             "allow_individual": rules.allow_individual,
             "allow_team_invite_flow": rules.allow_team_invite_flow,
             "requires_qr_checkin": rules.requires_qr_checkin,

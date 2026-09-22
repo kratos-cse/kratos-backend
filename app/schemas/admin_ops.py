@@ -39,6 +39,8 @@ class AdminEventCreate(BaseModel):
     registration_mode: RegistrationMode = RegistrationMode.TEAM_OR_INDIVIDUAL
     team_min_size: int = Field(default=1, ge=1)
     team_max_size: int = Field(default=1, ge=1)
+    required_member_count: Optional[int] = Field(default=None, ge=1)
+    substitute_count: Optional[int] = Field(default=None, ge=0)
     allow_team_invite_flow: bool = False
     requires_qr_checkin: bool = True
     capacity_type: CapacityType = CapacityType.PARTICIPANTS
@@ -72,6 +74,8 @@ class AdminRegistrationRulesUpdate(BaseModel):
     registration_mode: Optional[RegistrationMode] = None
     team_min_size: Optional[int] = Field(default=None, ge=1)
     team_max_size: Optional[int] = Field(default=None, ge=1)
+    required_member_count: Optional[int] = Field(default=None, ge=1)
+    substitute_count: Optional[int] = Field(default=None, ge=0)
     allow_team_invite_flow: Optional[bool] = None
     requires_qr_checkin: Optional[bool] = None
     capacity_type: Optional[CapacityType] = None
@@ -79,7 +83,6 @@ class AdminRegistrationRulesUpdate(BaseModel):
     custom_fields: Optional[dict[str, Any]] = None
     registration_opens_at: Optional[datetime] = None
     registration_closes_at: Optional[datetime] = None
-
 
 class AdminParticipantUpdate(BaseModel):
     full_name: Optional[str] = Field(default=None, min_length=1, max_length=200)

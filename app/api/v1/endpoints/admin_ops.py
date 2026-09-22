@@ -102,13 +102,28 @@ async def create_event(
     )
     ops.apply_registration_mode_to_rules(rules, body.registration_mode)
     if body.registration_mode != RegistrationMode.INDIVIDUAL_ONLY:
-        rules.team_min_size = body.team_min_size
-        rules.team_max_size = body.team_max_size
+        ops.apply_roster_to_rules(
+            rules,
+            required_member_count=body.required_member_count,
+            substitute_count=body.substitute_count,
+            team_min_size=body.team_min_size,
+            team_max_size=body.team_max_size,
+        )
     db.add(rules)
     await db.commit()
     await db.refresh(event)
     await db.refresh(rules)
     invalidate_events_list_cache()
+    return _success(ops.event_to_dict(event, rules))
+
+
+@router.get("/events/{event_id}")
+async def get_admin_event(
+    event_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _: AdminUser = Depends(get_current_active_admin),
+):
+    event, rules = await ops.get_event_with_rules(db, event_id)
     return _success(ops.event_to_dict(event, rules))
 
 
@@ -139,10 +154,19 @@ async def patch_registration_rules(
     event, rules = await ops.get_event_with_rules(db, event_id)
     data = body.model_dump(exclude_unset=True)
     mode = data.pop("registration_mode", None)
+    roster_keys = (
+        "required_member_count",
+        "substitute_count",
+        "team_min_size",
+        "team_max_size",
+    )
+    roster_patch = {k: data.pop(k) for k in roster_keys if k in data}
     for field, value in data.items():
         setattr(rules, field, value)
     if mode is not None:
         ops.apply_registration_mode_to_rules(rules, mode)
+    if roster_patch and rules.registration_mode != RegistrationMode.INDIVIDUAL_ONLY:
+        ops.apply_roster_to_rules(rules, **roster_patch)
     await db.commit()
     await db.refresh(rules)
     invalidate_events_list_cache()

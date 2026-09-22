@@ -10,6 +10,7 @@ from app.schemas.team import (
     InvitationOut,
     InvitationPublicOut,
     JoinTeamResponse,
+    RosterAddRequest,
     TeamCreateRequest,
     TeamDetailOut,
     TeamMemberOut,
@@ -69,6 +70,23 @@ async def create_invitation(
     profile: Profile = Depends(get_current_profile),
 ):
     return await team_service.create_invitation(db, team_id=team_id, profile=profile)
+
+
+@router.post(
+    "/teams/{team_id}/roster",
+    response_model=TeamDetailOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def add_roster_member(
+    team_id: uuid.UUID,
+    payload: RosterAddRequest,
+    db: AsyncSession = Depends(get_db),
+    profile: Profile = Depends(get_current_profile),
+):
+    """Leader adds a mandatory member or substitute (linked account or leader-entered)."""
+    return await team_service.add_roster_member(
+        db, team_id=team_id, profile=profile, payload=payload
+    )
 
 
 @router.get("/team-invitations/{invite_code}", response_model=InvitationPublicOut)
