@@ -70,6 +70,7 @@ class ReceiptOut(BaseModel):
     id: uuid.UUID
     receipt_number: str
     pdf_url: str
+    html_url: str
     issued_at: datetime
 
 

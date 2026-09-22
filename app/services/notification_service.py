@@ -1,5 +1,6 @@
 """Email notifications via SMTP (aiosmtplib). SMTP failures never propagate to callers."""
 import asyncio
+import html
 import logging
 from datetime import datetime, timezone
 from email.message import EmailMessage
@@ -23,10 +24,9 @@ from app.models.event import Event
 from app.models.notification import Notification
 from app.models.payment import Payment
 from app.models.profile import Profile
+from app.models.receipt import Receipt
 from app.models.registration import Registration
 from app.models.team import Team, TeamMember
-from app.models.user import User
-from app.services import qr_service
 
 logger = logging.getLogger("notification_service")
 
@@ -47,7 +47,123 @@ async def _resolve_email(db: AsyncSession, profile_id: UUID) -> Optional[str]:
     return None
 
 
-async def _send_smtp(to_email: str, subject: str, body: str) -> tuple[bool, Optional[str]]:
+def _amount_inr(paise: int) -> str:
+    return f"₹{paise / 100:.2f}"
+
+
+def _app_url() -> str:
+    return settings.APP_PUBLIC_BASE_URL.rstrip("/")
+
+
+def render_email_html(
+    *,
+    title: str,
+    greeting: str,
+    paragraphs: list[str],
+    details: Optional[list[tuple[str, str]]] = None,
+    cta_url: Optional[str] = None,
+    cta_label: Optional[str] = None,
+    footnote: Optional[str] = None,
+) -> str:
+    """Branded multipart HTML body for KRATOS transactional mail."""
+    paras = "".join(
+        f'<p style="margin:0 0 14px;font-size:15px;line-height:1.55;color:#334155;">'
+        f"{html.escape(p)}</p>"
+        for p in paragraphs
+        if p
+    )
+    detail_rows = ""
+    if details:
+        cells = "".join(
+            "<tr>"
+            f'<td style="padding:8px 0;font-size:13px;color:#64748b;width:38%;">'
+            f"{html.escape(k)}</td>"
+            f'<td style="padding:8px 0;font-size:14px;color:#0f172a;font-weight:600;">'
+            f"{html.escape(v)}</td>"
+            "</tr>"
+            for k, v in details
+        )
+        detail_rows = (
+            '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" '
+            'style="margin:8px 0 20px;border-top:1px solid #e2e8f0;border-bottom:1px solid #e2e8f0;">'
+            f"{cells}</table>"
+        )
+    cta = ""
+    if cta_url and cta_label:
+        cta = (
+            '<p style="margin:24px 0 8px;">'
+            f'<a href="{html.escape(cta_url)}" '
+            'style="display:inline-block;background:#0f172a;color:#f8fafc;'
+            "text-decoration:none;font-weight:600;font-size:14px;"
+            'padding:12px 22px;border-radius:8px;">'
+            f"{html.escape(cta_label)}</a></p>"
+        )
+    note = ""
+    if footnote:
+        note = (
+            f'<p style="margin:28px 0 0;font-size:12px;line-height:1.5;color:#94a3b8;">'
+            f"{html.escape(footnote)}</p>"
+        )
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{html.escape(title)}</title></head>
+<body style="margin:0;padding:0;background:#e2e8f0;font-family:Georgia,'Times New Roman',serif;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#e2e8f0;padding:32px 12px;">
+    <tr><td align="center">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+             style="max-width:560px;background:#ffffff;border-radius:12px;overflow:hidden;
+                    border:1px solid #cbd5e1;">
+        <tr><td style="background:#0f172a;padding:28px 32px;">
+          <div style="font-size:11px;letter-spacing:0.22em;text-transform:uppercase;color:#94a3b8;">
+            ACE · CSE · Easwari</div>
+          <div style="margin-top:8px;font-size:28px;font-weight:700;letter-spacing:0.06em;color:#f8fafc;">
+            KRATOS&apos;26</div>
+        </td></tr>
+        <tr><td style="padding:28px 32px 32px;">
+          <h1 style="margin:0 0 16px;font-size:20px;line-height:1.3;color:#0f172a;font-weight:700;">
+            {html.escape(title)}</h1>
+          <p style="margin:0 0 14px;font-size:15px;line-height:1.55;color:#334155;">
+            {html.escape(greeting)}</p>
+          {paras}
+          {detail_rows}
+          {cta}
+          {note}
+        </td></tr>
+        <tr><td style="padding:16px 32px;background:#f8fafc;border-top:1px solid #e2e8f0;">
+          <p style="margin:0;font-size:11px;color:#94a3b8;line-height:1.5;">
+            Association of Computer Engineers · Department of CSE · Easwari Engineering College</p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>
+"""
+
+
+def _html_from_plain(body: str, subject: str) -> str:
+    parts = [p.strip() for p in body.split("\n\n") if p.strip()]
+    paragraphs = []
+    for block in parts:
+        paragraphs.extend(line for line in block.split("\n") if line.strip())
+    return render_email_html(
+        title=subject,
+        greeting=paragraphs[0] if paragraphs else "Hello,",
+        paragraphs=paragraphs[1:] if len(paragraphs) > 1 else [],
+        cta_url=_app_url(),
+        cta_label="Open KRATOS",
+    )
+
+
+async def _send_smtp(
+    to_email: str,
+    subject: str,
+    body: str,
+    *,
+    html_body: Optional[str] = None,
+) -> tuple[bool, Optional[str]]:
     if not settings.SMTP_HOST or not settings.SMTP_FROM:
         return False, "SMTP not configured (SMTP_HOST / SMTP_FROM missing)"
 
@@ -56,6 +172,8 @@ async def _send_smtp(to_email: str, subject: str, body: str) -> tuple[bool, Opti
     message["To"] = to_email
     message["Subject"] = subject
     message.set_content(body)
+    if html_body:
+        message.add_alternative(html_body, subtype="html")
 
     try:
         await asyncio.wait_for(
@@ -76,10 +194,16 @@ async def _send_smtp(to_email: str, subject: str, body: str) -> tuple[bool, Opti
         return False, str(exc)
 
 
-async def _deliver_notification_bg(notification_id: UUID, to_email: str, subject: str, body: str) -> None:
+async def _deliver_notification_bg(
+    notification_id: UUID,
+    to_email: str,
+    subject: str,
+    body: str,
+    html_body: Optional[str] = None,
+) -> None:
     from app.db.session import AsyncSessionLocal
 
-    ok, err = await _send_smtp(to_email, subject, body)
+    ok, err = await _send_smtp(to_email, subject, body, html_body=html_body)
     try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(select(Notification).where(Notification.id == notification_id))
@@ -109,7 +233,12 @@ async def create_and_send(
     payment_id: Optional[UUID] = None,
     registration_id: Optional[UUID] = None,
     team_id: Optional[UUID] = None,
+    html_body: Optional[str] = None,
 ) -> Notification:
+    stored_payload = dict(payload or {})
+    if html_body:
+        stored_payload["html_body"] = html_body
+
     notification = Notification(
         profile_id=profile_id,
         kind=kind,
@@ -117,7 +246,7 @@ async def create_and_send(
         status=NotificationStatus.PENDING,
         subject=subject,
         body=body,
-        payload=payload,
+        payload=stored_payload or None,
         payment_id=payment_id,
         registration_id=registration_id,
         team_id=team_id,
@@ -135,8 +264,10 @@ async def create_and_send(
     await db.commit()
     await db.refresh(notification)
 
-    # Deliver asynchronously in background so callers never block on SMTP
-    asyncio.create_task(_deliver_notification_bg(notification.id, to_email, subject, body))
+    effective_html = html_body or _html_from_plain(body, subject)
+    asyncio.create_task(
+        _deliver_notification_bg(notification.id, to_email, subject, body, effective_html)
+    )
     return notification
 
 
@@ -161,13 +292,22 @@ async def resend(db: AsyncSession, notification_id: UUID) -> Notification:
     await db.commit()
     await db.refresh(notification)
 
-    asyncio.create_task(_deliver_notification_bg(notification.id, to_email, notification.subject, notification.body))
+    html_body = None
+    if isinstance(notification.payload, dict):
+        html_body = notification.payload.get("html_body")
+    if not html_body:
+        html_body = _html_from_plain(notification.body, notification.subject)
+
+    asyncio.create_task(
+        _deliver_notification_bg(
+            notification.id,
+            to_email,
+            notification.subject,
+            notification.body,
+            html_body,
+        )
+    )
     return notification
-
-
-
-def _amount_inr(paise: int) -> str:
-    return f"₹{paise / 100:.2f}"
 
 
 async def notify_payment_confirmed(db: AsyncSession, payment_id: UUID) -> None:
@@ -182,6 +322,8 @@ async def notify_payment_confirmed(db: AsyncSession, payment_id: UUID) -> None:
     event_name = "your event"
     registration_id: Optional[UUID] = None
     team_id: Optional[UUID] = None
+    venue = ""
+    wa = ""
 
     if registration:
         registration_id = registration.id
@@ -190,13 +332,58 @@ async def notify_payment_confirmed(db: AsyncSession, payment_id: UUID) -> None:
         event = ev.scalar_one_or_none()
         if event:
             event_name = event.name
+            venue = event.venue or ""
+            wa = event.whatsapp_group_link or ""
 
+    receipt_res = await db.execute(select(Receipt).where(Receipt.payment_id == payment_id))
+    receipt = receipt_res.scalar_one_or_none()
+    receipt_no = receipt.receipt_number if receipt else None
+    from app.services.receipt_service import receipt_html_url
+
+    receipt_link = receipt_html_url(payment_id)
+
+    amount = _amount_inr(payment.amount_paise)
     subject = f"Payment confirmed — {event_name}"
-    body = (
-        f"Your payment of {_amount_inr(payment.amount_paise)} for {event_name} has been received.\n\n"
-        f"Your registration is confirmed. Sign in to KRATOS to view your QR code for check-in.\n"
-        f"{settings.APP_PUBLIC_BASE_URL}\n"
+    body_lines = [
+        f"Your payment of {amount} for {event_name} has been received.",
+        "",
+        "Your registration is confirmed. Sign in to KRATOS to view your QR code for check-in.",
+        f"Receipt (sign in required): {receipt_link}",
+        _app_url(),
+    ]
+    if receipt_no:
+        body_lines.insert(3, f"Receipt number: {receipt_no}")
+    if venue:
+        body_lines.append(f"Venue: {venue}")
+    if wa:
+        body_lines.append(f"Event WhatsApp group: {wa}")
+    body = "\n".join(body_lines) + "\n"
+
+    details: list[tuple[str, str]] = [
+        ("Event", event_name),
+        ("Amount paid", amount),
+        ("Payment ID", str(payment.id)),
+    ]
+    if receipt_no:
+        details.insert(2, ("Receipt number", receipt_no))
+    if venue:
+        details.append(("Venue", venue))
+
+    html_body = render_email_html(
+        title="Payment confirmed",
+        greeting=f"You're all set for {event_name}.",
+        paragraphs=[
+            f"We've received your payment of {amount}. Your registration is confirmed.",
+            "Sign in to KRATOS to open your receipt and QR check-in pass. "
+            "Bring the QR on event day — scanners verify it at the gate.",
+            *( [f"Join the event WhatsApp group: {wa}"] if wa else [] ),
+        ],
+        details=details,
+        cta_url=receipt_link,
+        cta_label="View receipt & pass",
+        footnote="Receipt links require your KRATOS sign-in. Do not forward this email to share access.",
     )
+
     await create_and_send(
         db,
         payment.payer_profile_id,
@@ -206,7 +393,8 @@ async def notify_payment_confirmed(db: AsyncSession, payment_id: UUID) -> None:
         payment_id=payment_id,
         registration_id=registration_id,
         team_id=team_id,
-        payload={"amount_paise": payment.amount_paise},
+        payload={"amount_paise": payment.amount_paise, "receipt_number": receipt_no},
+        html_body=html_body,
     )
 
 
@@ -232,7 +420,18 @@ async def notify_member_joined(
     subject = f"{member_name} joined {team_name}"
     body = (
         f"{member_name} has joined {team_name} for {event_name}.\n\n"
-        f"View your team in the KRATOS app.\n{settings.APP_PUBLIC_BASE_URL}\n"
+        f"View your team in the KRATOS app.\n{_app_url()}\n"
+    )
+    html_body = render_email_html(
+        title="New team member",
+        greeting=f"{member_name} just joined {team_name}.",
+        paragraphs=[
+            f"They're now on your roster for {event_name}.",
+            "Open KRATOS to review the full team and invite status.",
+        ],
+        details=[("Team", team_name), ("Event", event_name), ("Member", member_name)],
+        cta_url=_app_url(),
+        cta_label="View team",
     )
     await create_and_send(
         db,
@@ -242,6 +441,7 @@ async def notify_member_joined(
         body,
         team_id=team_id,
         payload={"member_profile_id": str(member_profile_id)},
+        html_body=html_body,
     )
 
 
@@ -258,25 +458,47 @@ async def notify_member_confirmation(db: AsyncSession, team_member_id: UUID) -> 
 
     from app.models.qr_code import QRCode
 
-    qr_res = await db.execute(select(QRCode).where(QRCode.team_member_id == team_member_id, QRCode.is_active.is_(True)))
+    qr_res = await db.execute(
+        select(QRCode).where(QRCode.team_member_id == team_member_id, QRCode.is_active.is_(True))
+    )
     qr = qr_res.scalar_one_or_none()
 
     event_name = event.name if event else "the event"
     team_name = team.name if team else "your team"
     wa = event.whatsapp_group_link if event and event.whatsapp_group_link else ""
+    venue = event.venue if event and event.venue else ""
 
     subject = f"You're registered — {event_name}"
     body_lines = [
         f"You have joined {team_name} for {event_name}.",
         "",
         "Your individual QR code is available in the KRATOS app for event check-in.",
-        settings.APP_PUBLIC_BASE_URL,
+        _app_url(),
     ]
     if qr:
         body_lines.extend(["", f"QR token (for scanners): {qr.token}"])
+    if venue:
+        body_lines.extend(["", f"Venue: {venue}"])
     if wa:
         body_lines.extend(["", f"Event WhatsApp group: {wa}"])
     body = "\n".join(body_lines) + "\n"
+
+    details = [("Event", event_name), ("Team", team_name)]
+    if venue:
+        details.append(("Venue", venue))
+
+    html_body = render_email_html(
+        title="You're on the team",
+        greeting=f"Welcome to {team_name} for {event_name}.",
+        paragraphs=[
+            "Your spot is confirmed. Sign in to KRATOS to open your personal QR check-in pass.",
+            *( [f"Join the event WhatsApp group: {wa}"] if wa else [] ),
+        ],
+        details=details,
+        cta_url=_app_url(),
+        cta_label="Open KRATOS",
+        footnote="Keep your QR private — it is your check-in credential.",
+    )
 
     await create_and_send(
         db,
@@ -286,6 +508,7 @@ async def notify_member_confirmation(db: AsyncSession, team_member_id: UUID) -> 
         body,
         team_id=member.team_id,
         payload={"team_member_id": str(team_member_id)},
+        html_body=html_body,
     )
 
 
@@ -303,7 +526,17 @@ async def notify_team_completed(db: AsyncSession, leader_profile_id: UUID, team_
     subject = f"{team_name} is complete — {event_name}"
     body = (
         f"Great news! {team_name} has reached the required size for {event_name}.\n\n"
-        f"{settings.APP_PUBLIC_BASE_URL}\n"
+        f"{_app_url()}\n"
+    )
+    html_body = render_email_html(
+        title="Team complete",
+        greeting=f"{team_name} is ready for {event_name}.",
+        paragraphs=[
+            "You've reached the required roster size. Make sure every member has their QR pass before event day.",
+        ],
+        details=[("Team", team_name), ("Event", event_name)],
+        cta_url=_app_url(),
+        cta_label="View team",
     )
     await create_and_send(
         db,
@@ -312,6 +545,7 @@ async def notify_team_completed(db: AsyncSession, leader_profile_id: UUID, team_
         subject,
         body,
         team_id=team_id,
+        html_body=html_body,
     )
 
 
@@ -328,10 +562,29 @@ async def notify_refund(
         return
 
     amount = amount_paise if amount_paise is not None else payment.amount_paise
-    subject = "Refund processed — KRATOS"
-    body = f"A refund of {_amount_inr(amount)} has been issued to your original payment method.\n"
+    amount_str = _amount_inr(amount)
+    subject = "Refund processed — KRATOS'26"
+    body = f"A refund of {amount_str} has been issued to your original payment method.\n"
     if reason:
         body += f"\nReason: {reason}\n"
+
+    details: list[tuple[str, str]] = [("Refund amount", amount_str), ("Payment ID", str(payment.id))]
+    if reason:
+        details.append(("Reason", reason))
+
+    html_body = render_email_html(
+        title="Refund processed",
+        greeting="A refund has been issued for your KRATOS'26 payment.",
+        paragraphs=[
+            f"{amount_str} will return to your original payment method. "
+            "Bank timelines vary — allow a few business days.",
+            *( [f"Reason: {reason}"] if reason else [] ),
+        ],
+        details=details,
+        cta_url=_app_url(),
+        cta_label="Open KRATOS",
+        footnote="If the amount does not appear within 7 business days, reply to this email with your payment ID.",
+    )
 
     await create_and_send(
         db,
@@ -341,6 +594,7 @@ async def notify_refund(
         body,
         payment_id=payment_id,
         payload={"reason": reason, "amount_paise": amount},
+        html_body=html_body,
     )
 
 
@@ -379,6 +633,13 @@ async def send_announcement(
     body: str,
 ) -> list[Notification]:
     profile_ids = await _eligible_event_profile_ids(db, event_id)
+    html_body = render_email_html(
+        title=subject,
+        greeting="Announcement from KRATOS'26",
+        paragraphs=[p for p in body.split("\n") if p.strip()],
+        cta_url=_app_url(),
+        cta_label="Open KRATOS",
+    )
     sent: list[Notification] = []
     for pid in profile_ids:
         n = await create_and_send(
@@ -388,6 +649,7 @@ async def send_announcement(
             subject,
             body,
             payload={"event_id": str(event_id)},
+            html_body=html_body,
         )
         sent.append(n)
     return sent
@@ -400,6 +662,13 @@ async def send_reminder(
     body: str,
 ) -> list[Notification]:
     profile_ids = await _eligible_event_profile_ids(db, event_id)
+    html_body = render_email_html(
+        title=subject,
+        greeting="Reminder from KRATOS'26",
+        paragraphs=[p for p in body.split("\n") if p.strip()],
+        cta_url=_app_url(),
+        cta_label="Open KRATOS",
+    )
     sent: list[Notification] = []
     for pid in profile_ids:
         n = await create_and_send(
@@ -409,6 +678,7 @@ async def send_reminder(
             subject,
             body,
             payload={"event_id": str(event_id)},
+            html_body=html_body,
         )
         sent.append(n)
     return sent

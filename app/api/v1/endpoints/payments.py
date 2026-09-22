@@ -328,6 +328,107 @@ async def sync_payment_status(
     }
 
 
+async def _assert_can_access_payment(db: AsyncSession, payment: Payment, payer: Profile) -> None:
+    if payment.payer_profile_id == payer.id:
+        return
+    admin_result = await db.execute(
+        select(AdminUser).where(AdminUser.user_id == payer.user_id, AdminUser.is_active.is_(True))
+    )
+    if admin_result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=403, detail="Not your payment")
+
+
+@router.get("/payments/{payment_id}/receipt")
+async def get_payment_receipt(
+    payment_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    payer: Profile = Depends(get_current_profile),
+):
+    from app.schemas.registration import ReceiptOut
+    from app.services.receipt_service import ensure_receipt, receipt_html_url, receipt_pdf_url
+
+    result = await db.execute(select(Payment).where(Payment.id == payment_id))
+    payment = result.scalar_one_or_none()
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+
+    await _assert_can_access_payment(db, payment, payer)
+
+    if payment.status != PaymentStatus.PAID:
+        raise HTTPException(status_code=404, detail="Receipt is only available after payment is confirmed")
+
+    receipt = await ensure_receipt(db, payment_id)
+    await db.commit()
+
+    return ReceiptOut(
+        id=receipt.id,
+        receipt_number=receipt.receipt_number,
+        pdf_url=receipt_pdf_url(payment_id),
+        html_url=receipt_html_url(payment_id),
+        issued_at=receipt.issued_at,
+    )
+
+
+@router.get("/payments/{payment_id}/receipt/html")
+async def get_payment_receipt_html(
+    payment_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    payer: Profile = Depends(get_current_profile),
+):
+    from fastapi.responses import HTMLResponse
+
+    from app.services.receipt_service import ensure_receipt, get_receipt_data_context, render_html_receipt
+
+    result = await db.execute(select(Payment).where(Payment.id == payment_id))
+    payment = result.scalar_one_or_none()
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+
+    await _assert_can_access_payment(db, payment, payer)
+
+    if payment.status != PaymentStatus.PAID:
+        raise HTTPException(status_code=404, detail="Receipt is only available after payment is confirmed")
+
+    await ensure_receipt(db, payment_id)
+    await db.commit()
+
+    ctx = await get_receipt_data_context(db, payment_id)
+    return HTMLResponse(content=render_html_receipt(ctx), media_type="text/html")
+
+
+@router.get("/payments/{payment_id}/receipt/pdf")
+async def get_payment_receipt_pdf(
+    payment_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    payer: Profile = Depends(get_current_profile),
+):
+    from fastapi.responses import FileResponse
+
+    from app.services.receipt_service import ensure_receipt, receipt_pdf_path
+
+    result = await db.execute(select(Payment).where(Payment.id == payment_id))
+    payment = result.scalar_one_or_none()
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+
+    await _assert_can_access_payment(db, payment, payer)
+
+    if payment.status != PaymentStatus.PAID:
+        raise HTTPException(status_code=404, detail="Receipt is only available after payment is confirmed")
+
+    receipt = await ensure_receipt(db, payment_id)
+    await db.commit()
+
+    path = receipt_pdf_path(receipt.receipt_number)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Receipt PDF not found")
+    return FileResponse(
+        path,
+        media_type="application/pdf",
+        filename=f"{receipt.receipt_number}.pdf",
+    )
+
+
 @router.post("/admin/payments/{payment_id}/refund")
 async def admin_refund(
     payment_id: UUID,

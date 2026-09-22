@@ -1,18 +1,26 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import FileResponse, HTMLResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_profile, get_current_user
 from app.db.session import get_db
-from app.models.enums import PaymentStatus
+from app.models.enums import PaymentStatus, RegistrationStatus
 from app.models.profile import Profile
 from app.models.qr_code import QRCode
-from app.models.receipt import Receipt
 from app.models.team import TeamMember
 from app.models.user import User
 from app.schemas.registration import QRCodeOut, ReceiptOut, RegistrationCreateRequest, RegistrationOut
+from app.services.receipt_service import (
+    ensure_receipt,
+    get_receipt_data_context,
+    receipt_html_url,
+    receipt_pdf_path,
+    receipt_pdf_url,
+    render_html_receipt,
+)
 from app.services.registration_service import (
     assert_can_view_registration,
     cancel_unpaid_registration,
@@ -22,6 +30,35 @@ from app.services.registration_service import (
 )
 
 router = APIRouter(tags=["Registration"])
+
+
+def _receipt_out(receipt, payment_id: uuid.UUID) -> ReceiptOut:
+    return ReceiptOut(
+        id=receipt.id,
+        receipt_number=receipt.receipt_number,
+        pdf_url=receipt_pdf_url(payment_id),
+        html_url=receipt_html_url(payment_id),
+        issued_at=receipt.issued_at,
+    )
+
+
+async def _assert_paid_receipt(registration) -> None:
+    if registration.payment_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No payment recorded for this registration yet",
+        )
+    payment = registration.payment
+    if payment is None or payment.status != PaymentStatus.PAID:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Receipt is only available after payment is confirmed",
+        )
+    if registration.status != RegistrationStatus.CONFIRMED:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Receipt is only available for confirmed registrations",
+        )
 
 
 @router.post(
@@ -82,7 +119,6 @@ async def cancel_registration(
     )
 
 
-
 @router.get("/users/me/registrations", response_model=list[RegistrationOut])
 async def list_own_registrations(
     db: AsyncSession = Depends(get_db),
@@ -100,17 +136,53 @@ async def get_registration_receipt(
 ):
     registration = await get_registration_or_404(db, registration_id)
     await assert_can_view_registration(db, registration, profile, current_user.is_admin_flagged)
+    await _assert_paid_receipt(registration)
 
-    if registration.payment_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="No payment recorded for this registration yet"
-        )
+    receipt = await ensure_receipt(db, registration.payment_id)
+    await db.commit()
+    return _receipt_out(receipt, registration.payment_id)
 
-    result = await db.execute(select(Receipt).where(Receipt.payment_id == registration.payment_id))
-    receipt = result.scalar_one_or_none()
-    if receipt is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Receipt has not been generated yet")
-    return receipt
+
+@router.get("/registrations/{registration_id}/receipt/html", response_class=HTMLResponse)
+async def get_registration_receipt_html(
+    registration_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    profile: Profile = Depends(get_current_profile),
+):
+    registration = await get_registration_or_404(db, registration_id)
+    await assert_can_view_registration(db, registration, profile, current_user.is_admin_flagged)
+    await _assert_paid_receipt(registration)
+
+    await ensure_receipt(db, registration.payment_id)
+    await db.commit()
+
+    ctx = await get_receipt_data_context(db, registration.payment_id)
+    return HTMLResponse(content=render_html_receipt(ctx), media_type="text/html")
+
+
+@router.get("/registrations/{registration_id}/receipt/pdf")
+async def get_registration_receipt_pdf(
+    registration_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    profile: Profile = Depends(get_current_profile),
+):
+    registration = await get_registration_or_404(db, registration_id)
+    await assert_can_view_registration(db, registration, profile, current_user.is_admin_flagged)
+    await _assert_paid_receipt(registration)
+
+    receipt = await ensure_receipt(db, registration.payment_id)
+    await db.commit()
+
+    path = receipt_pdf_path(receipt.receipt_number)
+    if not path.exists():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Receipt PDF not found")
+    return FileResponse(
+        path,
+        media_type="application/pdf",
+        filename=f"{receipt.receipt_number}.pdf",
+    )
 
 
 @router.get("/registrations/{registration_id}/qr", response_model=QRCodeOut)
