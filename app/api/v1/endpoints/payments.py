@@ -235,6 +235,27 @@ async def payments_webhook(request: Request, db: AsyncSession = Depends(get_db))
     return {"received": True, "applied": False}
 
 
+async def _sync_payment_if_needed(db: AsyncSession, payment: Payment) -> Payment:
+    if (
+        payment.status == PaymentStatus.CREATED
+        and payment.razorpay_order_id
+        and settings.RAZORPAY_KEY_ID
+        and settings.RAZORPAY_KEY_SECRET
+    ):
+        try:
+            order_payments = with_retry(lambda: get_razorpay().order.payments(payment.razorpay_order_id))
+            items = order_payments.get("items", [])
+            for item in items:
+                if item.get("status") in ("captured", "authorized"):
+                    applied = await apply_payment_success(db, payment.id, item["id"])
+                    if applied.applied:
+                        await db.refresh(payment)
+                        break
+        except Exception:
+            pass
+    return payment
+
+
 @router.get("/payments/{payment_id}")
 async def get_payment(
     payment_id: UUID,
@@ -253,6 +274,8 @@ async def get_payment(
         if admin_result.scalar_one_or_none() is None:
             raise HTTPException(status_code=403, detail="Not your payment")
 
+    payment = await _sync_payment_if_needed(db, payment)
+
     return {
         "id": str(payment.id),
         "payer_profile_id": str(payment.payer_profile_id),
@@ -269,6 +292,33 @@ async def get_payment(
         "refund_reason": payment.refund_reason,
         "created_at": payment.created_at,
         "updated_at": payment.updated_at,
+    }
+
+
+@router.post("/payments/{payment_id}/sync")
+async def sync_payment_status(
+    payment_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    payer: Profile = Depends(get_current_profile),
+):
+    result = await db.execute(select(Payment).where(Payment.id == payment_id))
+    payment = result.scalar_one_or_none()
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+
+    if payment.payer_profile_id != payer.id:
+        admin_result = await db.execute(
+            select(AdminUser).where(AdminUser.user_id == payer.user_id, AdminUser.is_active.is_(True))
+        )
+        if admin_result.scalar_one_or_none() is None:
+            raise HTTPException(status_code=403, detail="Not your payment")
+
+    payment = await _sync_payment_if_needed(db, payment)
+    return {
+        "id": str(payment.id),
+        "status": payment.status.value,
+        "razorpay_order_id": payment.razorpay_order_id,
+        "razorpay_payment_id": payment.razorpay_payment_id,
     }
 
 

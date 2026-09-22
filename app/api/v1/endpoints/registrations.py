@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_profile, get_current_user
 from app.db.session import get_db
+from app.models.enums import PaymentStatus
 from app.models.profile import Profile
 from app.models.qr_code import QRCode
 from app.models.receipt import Receipt
@@ -52,6 +53,13 @@ async def get_registration(
 ):
     registration = await get_registration_or_404(db, registration_id)
     await assert_can_view_registration(db, registration, profile, current_user.is_admin_flagged)
+
+    if registration.payment and registration.payment.status == PaymentStatus.CREATED:
+        from app.api.v1.endpoints.payments import _sync_payment_if_needed
+
+        await _sync_payment_if_needed(db, registration.payment)
+        registration = await get_registration_or_404(db, registration_id)
+
     return registration
 
 
