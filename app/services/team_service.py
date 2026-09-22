@@ -303,9 +303,12 @@ async def join_via_invitation(db: AsyncSession, invite_code: str, profile: Profi
                 status.HTTP_409_CONFLICT,
                 "You already belong to a different team for this event",
             )
+        reg_result = await db.execute(select(Registration.id).where(Registration.team_id == team.id))
+        registration_id = reg_result.scalar_one_or_none()
         return {
             "team": team,
             "member": await _to_member_out(db, existing_member),
+            "registration_id": registration_id,
         }
 
     active_count = await _active_member_count(db, team.id)
@@ -356,10 +359,15 @@ async def join_via_invitation(db: AsyncSession, invite_code: str, profile: Profi
     if team_became_complete:
         await notification_service.notify_team_completed(db, leader_profile_id, team_id)
 
+    reg_result = await db.execute(select(Registration.id).where(Registration.team_id == team.id))
+    registration_id = reg_result.scalar_one_or_none()
+
     return {
         "team": team,
         "member": await _to_member_out(db, member),
+        "registration_id": registration_id,
     }
+
 
 
 async def leave_team(

@@ -1,4 +1,5 @@
 """Email notifications via SMTP (aiosmtplib). SMTP failures never propagate to callers."""
+import asyncio
 import logging
 from datetime import datetime, timezone
 from email.message import EmailMessage
@@ -57,18 +58,43 @@ async def _send_smtp(to_email: str, subject: str, body: str) -> tuple[bool, Opti
     message.set_content(body)
 
     try:
-        await aiosmtplib.send(
-            message,
-            hostname=settings.SMTP_HOST,
-            port=settings.SMTP_PORT,
-            username=settings.SMTP_USER or None,
-            password=settings.SMTP_PASSWORD or None,
-            start_tls=settings.SMTP_TLS,
+        await asyncio.wait_for(
+            aiosmtplib.send(
+                message,
+                hostname=settings.SMTP_HOST,
+                port=settings.SMTP_PORT,
+                username=settings.SMTP_USER or None,
+                password=settings.SMTP_PASSWORD or None,
+                start_tls=settings.SMTP_TLS,
+                timeout=3.0,
+            ),
+            timeout=4.0,
         )
         return True, None
     except Exception as exc:
         logger.exception("SMTP send failed to=%s subject=%s", to_email, subject)
         return False, str(exc)
+
+
+async def _deliver_notification_bg(notification_id: UUID, to_email: str, subject: str, body: str) -> None:
+    from app.db.session import AsyncSessionLocal
+
+    ok, err = await _send_smtp(to_email, subject, body)
+    try:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(Notification).where(Notification.id == notification_id))
+            notif = result.scalar_one_or_none()
+            if notif:
+                if ok:
+                    notif.status = NotificationStatus.SENT
+                    notif.sent_at = datetime.now(timezone.utc)
+                    notif.error = None
+                else:
+                    notif.status = NotificationStatus.FAILED
+                    notif.error = err
+                await session.commit()
+    except Exception as exc:
+        logger.warning("Failed to update notification status for %s: %s", notification_id, exc)
 
 
 async def create_and_send(
@@ -106,16 +132,11 @@ async def create_and_send(
         await db.commit()
         return notification
 
-    ok, err = await _send_smtp(to_email, subject, body)
-    if ok:
-        notification.status = NotificationStatus.SENT
-        notification.sent_at = datetime.now(timezone.utc)
-        notification.error = None
-    else:
-        notification.status = NotificationStatus.FAILED
-        notification.error = err
-
     await db.commit()
+    await db.refresh(notification)
+
+    # Deliver asynchronously in background so callers never block on SMTP
+    asyncio.create_task(_deliver_notification_bg(notification.id, to_email, subject, body))
     return notification
 
 
@@ -137,17 +158,12 @@ async def resend(db: AsyncSession, notification_id: UUID) -> Notification:
         await db.commit()
         return notification
 
-    ok, err = await _send_smtp(to_email, notification.subject, notification.body)
-    if ok:
-        notification.status = NotificationStatus.SENT
-        notification.sent_at = datetime.now(timezone.utc)
-        notification.error = None
-    else:
-        notification.status = NotificationStatus.FAILED
-        notification.error = err
-
     await db.commit()
+    await db.refresh(notification)
+
+    asyncio.create_task(_deliver_notification_bg(notification.id, to_email, notification.subject, notification.body))
     return notification
+
 
 
 def _amount_inr(paise: int) -> str:
