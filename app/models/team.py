@@ -67,6 +67,7 @@ class TeamMember(Base):
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     team: Mapped["Team"] = relationship("Team", back_populates="members")
+    profile: Mapped["Profile"] = relationship("Profile", foreign_keys=[profile_id], lazy="raise")
 
 
 class TeamInvitation(Base):

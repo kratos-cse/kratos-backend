@@ -83,6 +83,7 @@ def event_to_dict(event: Event, rules: EventRegistrationRule) -> dict[str, Any]:
     return {
         "id": event.id,
         "name": event.name,
+        "tagline": event.tagline,
         "short_desc": event.short_desc,
         "long_desc": event.long_desc,
         "category": event.category,
@@ -92,6 +93,7 @@ def event_to_dict(event: Event, rules: EventRegistrationRule) -> dict[str, Any]:
         "venue": event.venue,
         "capacity": event.capacity,
         "whatsapp_group_link": event.whatsapp_group_link,
+        "whatsapp_group_available": bool(event.whatsapp_group_link),
         "google_sheet_id": event.google_sheet_id,
         "google_sheet_url": event.google_sheet_url,
         "starts_at": event.starts_at,

@@ -7,8 +7,11 @@ from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
+from app.core.errors import ALREADY_REGISTERED, TEAM_FULL, AppError
 from app.models.admin import AdminUser
 from app.models.enums import (
     EventStatus,
@@ -23,6 +26,7 @@ from app.models.profile import Profile
 from app.models.registration import Registration
 from app.models.team import Team, TeamInvitation, TeamMember
 from app.schemas.team import TeamUpdateRequest
+from app.services.event_service import spots_remaining
 
 _TERMINAL = (TeamMemberStatus.LEFT, TeamMemberStatus.REMOVED)
 
@@ -94,9 +98,8 @@ async def _require_leader_or_admin(db: AsyncSession, team: Team, profile: Profil
     raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the team leader can do this")
 
 
-async def _to_member_out(db: AsyncSession, member: TeamMember) -> dict:
-    result = await db.execute(select(Profile).where(Profile.id == member.profile_id))
-    profile = result.scalar_one_or_none()
+async def _to_member_out(member: TeamMember) -> dict:
+    profile = member.profile if "profile" in member.__dict__ else None
     return {
         "id": member.id,
         "team_id": member.team_id,
@@ -108,9 +111,17 @@ async def _to_member_out(db: AsyncSession, member: TeamMember) -> dict:
     }
 
 
+async def _load_members_with_profiles(db: AsyncSession, team_id: uuid.UUID) -> list[TeamMember]:
+    result = await db.execute(
+        select(TeamMember)
+        .options(selectinload(TeamMember.profile))
+        .where(TeamMember.team_id == team_id)
+    )
+    return list(result.scalars().all())
+
+
 async def _to_detail(db: AsyncSession, team: Team, rules: EventRegistrationRule) -> dict:
-    result = await db.execute(select(TeamMember).where(TeamMember.team_id == team.id))
-    members = list(result.scalars().all())
+    members = await _load_members_with_profiles(db, team.id)
     return {
         "id": team.id,
         "event_id": team.event_id,
@@ -118,14 +129,16 @@ async def _to_detail(db: AsyncSession, team: Team, rules: EventRegistrationRule)
         "leader_profile_id": team.leader_profile_id,
         "status": team.status,
         "created_at": team.created_at,
-        "active_member_count": await _active_member_count(db, team.id),
+        "active_member_count": sum(
+            1 for m in members if m.status in (TeamMemberStatus.ACTIVE, TeamMemberStatus.PENDING_PAYMENT)
+        ),
         "team_max_size": rules.team_max_size,
-        "members": [await _to_member_out(db, m) for m in members],
+        "members": [await _to_member_out(m) for m in members],
     }
 
 
 async def create_team(db: AsyncSession, event_id: uuid.UUID, profile: Profile, name: str) -> dict:
-    result = await db.execute(select(Event).where(Event.id == event_id))
+    result = await db.execute(select(Event).where(Event.id == event_id).with_for_update())
     event = result.scalar_one_or_none()
     if not event:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
@@ -142,6 +155,10 @@ async def create_team(db: AsyncSession, event_id: uuid.UUID, profile: Profile, n
     if rules.registration_closes_at and now > rules.registration_closes_at:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Registration has closed")
 
+    remaining = await spots_remaining(db, event, rules)
+    if remaining is not None and remaining <= 0:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "This event has reached capacity")
+
     existing = await db.execute(
         select(TeamMember).where(
             TeamMember.event_id == event_id,
@@ -150,7 +167,7 @@ async def create_team(db: AsyncSession, event_id: uuid.UUID, profile: Profile, n
         )
     )
     if existing.scalar_one_or_none():
-        raise HTTPException(status.HTTP_409_CONFLICT, "You already have a registration for this event")
+        raise AppError(ALREADY_REGISTERED, "You already have a registration for this event", status_code=409)
 
     team = Team(event_id=event_id, name=name, leader_profile_id=profile.id, status=TeamStatus.FORMING)
     db.add(team)
@@ -177,6 +194,9 @@ async def create_team(db: AsyncSession, event_id: uuid.UUID, profile: Profile, n
 
     try:
         await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise AppError(ALREADY_REGISTERED, "Could not create team - already registered", status_code=409)
     except Exception:
         await db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, "Could not create team - please retry")
@@ -195,8 +215,8 @@ async def get_team(db: AsyncSession, team_id: uuid.UUID, profile: Profile) -> di
 async def list_team_members(db: AsyncSession, team_id: uuid.UUID, profile: Profile) -> list[dict]:
     team = await _get_team_or_404(db, team_id)
     await _require_membership(db, team, profile)
-    result = await db.execute(select(TeamMember).where(TeamMember.team_id == team.id))
-    return [await _to_member_out(db, m) for m in result.scalars().all()]
+    members = await _load_members_with_profiles(db, team.id)
+    return [await _to_member_out(m) for m in members]
 
 
 async def update_team(
@@ -305,15 +325,16 @@ async def join_via_invitation(db: AsyncSession, invite_code: str, profile: Profi
             )
         reg_result = await db.execute(select(Registration.id).where(Registration.team_id == team.id))
         registration_id = reg_result.scalar_one_or_none()
+        await db.refresh(existing_member, attribute_names=["profile"])
         return {
             "team": team,
-            "member": await _to_member_out(db, existing_member),
+            "member": await _to_member_out(existing_member),
             "registration_id": registration_id,
         }
 
     active_count = await _active_member_count(db, team.id)
     if active_count >= rules.team_max_size:
-        raise HTTPException(status.HTTP_409_CONFLICT, "Team is full")
+        raise AppError(TEAM_FULL, "Team is full", status_code=409)
 
     member = TeamMember(
         team_id=team.id,
@@ -325,10 +346,15 @@ async def join_via_invitation(db: AsyncSession, invite_code: str, profile: Profi
     db.add(member)
     await db.flush()
 
+    # Re-check under the same FOR UPDATE lock after insert (concurrency safety).
+    new_active_count = await _active_member_count(db, team.id)
+    if new_active_count > rules.team_max_size:
+        await db.rollback()
+        raise AppError(TEAM_FULL, "Team is full", status_code=409)
+
     await qr_service.generate_for_team_member(db, member.id)
 
     team_became_complete = False
-    new_active_count = await _active_member_count(db, team.id)
     if new_active_count >= rules.team_max_size and team.status != TeamStatus.CANCELLED:
         team.status = TeamStatus.COMPLETE
         team_became_complete = True
@@ -341,33 +367,39 @@ async def join_via_invitation(db: AsyncSession, invite_code: str, profile: Profi
 
     try:
         await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise AppError(ALREADY_REGISTERED, "Could not join team - already a member", status_code=409)
     except Exception:
         await db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, "Could not join team - please retry")
 
     await db.refresh(member)
     await db.refresh(team)
+    await db.refresh(member, attribute_names=["profile"])
 
-    await notification_service.notify_member_confirmation(db, member_id)
-    await notification_service.notify_member_joined(
-        db,
-        leader_profile_id=leader_profile_id,
-        team_id=team_id,
-        member_profile_id=member_profile_id,
-        event_id=event_id,
-    )
-    if team_became_complete:
-        await notification_service.notify_team_completed(db, leader_profile_id, team_id)
+    # Notifications after commit (failures must not fail join).
+    try:
+        await notification_service.notify_member_confirmation(db, member_id)
+        await notification_service.notify_member_joined(
+            db,
+            leader_profile_id=leader_profile_id,
+            team_id=team_id,
+            member_profile_id=member_profile_id,
+            event_id=event_id,
+        )
+        if team_became_complete:
+            await notification_service.notify_team_completed(db, leader_profile_id, team_id)
+    except Exception:
+        pass
 
     reg_result = await db.execute(select(Registration.id).where(Registration.team_id == team.id))
     registration_id = reg_result.scalar_one_or_none()
-
     return {
         "team": team,
-        "member": await _to_member_out(db, member),
+        "member": await _to_member_out(member),
         "registration_id": registration_id,
     }
-
 
 
 async def leave_team(
@@ -375,7 +407,9 @@ async def leave_team(
 ) -> dict:
     team = await _get_team_or_404(db, team_id)
     result = await db.execute(
-        select(TeamMember).where(TeamMember.id == member_id, TeamMember.team_id == team.id)
+        select(TeamMember)
+        .options(selectinload(TeamMember.profile))
+        .where(TeamMember.id == member_id, TeamMember.team_id == team.id)
     )
     member = result.scalar_one_or_none()
     if not member:
@@ -383,11 +417,11 @@ async def leave_team(
     if member.profile_id != profile.id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only remove yourself this way")
     if member.status in _TERMINAL:
-        return await _to_member_out(db, member)
+        return await _to_member_out(member)
     member.status = TeamMemberStatus.LEFT
     await db.commit()
     await db.refresh(member)
-    return await _to_member_out(db, member)
+    return await _to_member_out(member)
 
 
 async def remove_member(
@@ -397,7 +431,9 @@ async def remove_member(
     await _require_leader_or_admin(db, team, profile)
 
     result = await db.execute(
-        select(TeamMember).where(TeamMember.id == member_id, TeamMember.team_id == team.id)
+        select(TeamMember)
+        .options(selectinload(TeamMember.profile))
+        .where(TeamMember.id == member_id, TeamMember.team_id == team.id)
     )
     member = result.scalar_one_or_none()
     if not member:
@@ -408,8 +444,8 @@ async def remove_member(
             "Cannot remove the team leader - use admin leadership transfer instead",
         )
     if member.status in _TERMINAL:
-        return await _to_member_out(db, member)
+        return await _to_member_out(member)
     member.status = TeamMemberStatus.REMOVED
     await db.commit()
     await db.refresh(member)
-    return await _to_member_out(db, member)
+    return await _to_member_out(member)

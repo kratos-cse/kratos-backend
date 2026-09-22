@@ -5,18 +5,26 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from app.models.enums import CapacityType, EventSlot, EventStatus, MemberRegistrationMode, RegistrationMode
+from app.models.enums import (
+    CapacityType,
+    EventCategory,
+    EventSlot,
+    EventStatus,
+    MemberRegistrationMode,
+    RegistrationMode,
+)
 
 
 class EventListItem(BaseModel):
-    """GET /events — catalogue + registration availability/status + basic pricing/team info."""
+    """GET /events — lightweight catalogue card (no capacity calc, no long_desc/WhatsApp)."""
 
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
     name: str
+    tagline: str | None = None
     short_desc: str | None
-    category: str | None
+    category: EventCategory | None
     fee: Decimal | None
     venue: str | None
     starts_at: datetime | None
@@ -30,21 +38,22 @@ class EventListItem(BaseModel):
 
 
 class EventDetail(BaseModel):
-    """GET /events/{event_id} — complete config needed by the registration frontend."""
+    """GET /events/{event_id} — registration-ready config. WhatsApp URL is not public."""
 
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
     name: str
+    tagline: str | None = None
     short_desc: str | None
     long_desc: str | None
-    category: str | None
+    category: EventCategory | None
     coordinator: str | None
     coord_contact: str | None
     fee: Decimal | None
     venue: str | None
     capacity: int | None
-    whatsapp_group_link: str | None
+    whatsapp_group_available: bool = False
     starts_at: datetime | None
     ends_at: datetime | None
     slot: EventSlot | None
@@ -52,7 +61,6 @@ class EventDetail(BaseModel):
     registration_open: bool
     spots_remaining: int | None
 
-    # Registration rules
     team_min_size: int
     team_max_size: int
     allow_individual: bool
@@ -64,3 +72,8 @@ class EventDetail(BaseModel):
     custom_fields: dict[str, Any] | None
     registration_opens_at: datetime | None
     registration_closes_at: datetime | None
+
+
+class EventWhatsAppOut(BaseModel):
+    event_id: uuid.UUID
+    whatsapp_group_link: str

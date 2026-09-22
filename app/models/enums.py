@@ -8,6 +8,16 @@ class EventStatus(str, enum.Enum):
     CANCELLED = "CANCELLED"
 
 
+class EventCategory(str, enum.Enum):
+    """Locked KRATOS'26 catalogue categories. PLAYGROUND includes sports."""
+
+    TECHNICAL = "TECHNICAL"
+    PLAYGROUND = "PLAYGROUND"
+    SPARK = "SPARK"
+    ONLINE = "ONLINE"
+    CULTURAL = "CULTURAL"
+
+
 class EventSlot(str, enum.Enum):
     MORNING = "MORNING"
     AFTERNOON = "AFTERNOON"

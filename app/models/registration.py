@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import CheckConstraint, DateTime, Enum, ForeignKey, func
+from sqlalchemy import CheckConstraint, DateTime, Enum, ForeignKey, Index, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -16,6 +16,20 @@ class Registration(Base):
         CheckConstraint(
             "(team_id IS NOT NULL AND profile_id IS NULL) OR (team_id IS NULL AND profile_id IS NOT NULL)",
             name="ck_registrations_team_xor_profile",
+        ),
+        Index(
+            "uq_registrations_event_profile_active",
+            "event_id",
+            "profile_id",
+            unique=True,
+            postgresql_where=text("profile_id IS NOT NULL AND status <> 'CANCELLED'"),
+        ),
+        Index(
+            "uq_registrations_event_team_active",
+            "event_id",
+            "team_id",
+            unique=True,
+            postgresql_where=text("team_id IS NOT NULL AND status <> 'CANCELLED'"),
         ),
     )
 

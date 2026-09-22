@@ -4,6 +4,7 @@ Computes the derived fields the API reference asks for on events:
 neither of which is a stored column, both are derived from EVENTS +
 EVENT_REGISTRATION_RULES + how many registrations/teams already exist.
 """
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -14,6 +15,27 @@ from app.models.enums import CapacityType, EventStatus, RegistrationStatus, Team
 from app.models.event import Event, EventRegistrationRule
 from app.models.registration import Registration
 from app.models.team import Team, TeamMember
+
+# Short TTL for public GET /events (no user-specific state).
+EVENTS_LIST_CACHE_TTL_SEC = 20.0
+_events_list_cache: dict[str, object] = {"expires_at": 0.0, "payload": None}
+
+
+def invalidate_events_list_cache() -> None:
+    _events_list_cache["expires_at"] = 0.0
+    _events_list_cache["payload"] = None
+
+
+def get_cached_events_list():
+    now = time.monotonic()
+    if _events_list_cache["payload"] is not None and now < float(_events_list_cache["expires_at"] or 0):
+        return _events_list_cache["payload"]
+    return None
+
+
+def set_cached_events_list(payload) -> None:
+    _events_list_cache["payload"] = payload
+    _events_list_cache["expires_at"] = time.monotonic() + EVENTS_LIST_CACHE_TTL_SEC
 
 
 def is_registration_open(event: Event, rules: Optional[EventRegistrationRule]) -> bool:
@@ -40,7 +62,7 @@ async def _count_used_capacity(db: AsyncSession, event: Event, rules: Optional[E
         )
         return result.scalar_one()
 
-    # PARTICIPANTS (default): solo registrations + active/pending team members
+    # PARTICIPANTS: solo regs + active/pending members (not the team Registration row).
     solo_count = (
         await db.execute(
             select(func.count()).select_from(Registration).where(

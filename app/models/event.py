@@ -3,22 +3,34 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Optional
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
-from app.models.enums import CapacityType, EventSlot, EventStatus, MemberRegistrationMode, RegistrationMode
+from app.models.enums import (
+    CapacityType,
+    EventCategory,
+    EventSlot,
+    EventStatus,
+    MemberRegistrationMode,
+    RegistrationMode,
+)
 
 
 class Event(Base):
     __tablename__ = "events"
+    __table_args__ = (Index("ix_events_starts_at", "starts_at"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String, nullable=False)
+    tagline: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
     short_desc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     long_desc: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    category: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    category: Mapped[Optional[EventCategory]] = mapped_column(
+        Enum(EventCategory, name="event_category", native_enum=True),
+        nullable=True,
+    )
     coordinator: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     coord_contact: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     fee: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2), nullable=True)

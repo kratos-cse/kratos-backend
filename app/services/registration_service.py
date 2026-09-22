@@ -11,9 +11,11 @@ from typing import Optional
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.errors import ALREADY_REGISTERED, AppError
 from app.models.enums import PaymentStatus, RegistrationStatus, TeamMemberRole, TeamMemberStatus, TeamStatus
 from app.models.event import Event, EventRegistrationRule
 from app.models.profile import Profile
@@ -70,7 +72,7 @@ async def create_registration(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Registration is not open for this event")
 
     if await _already_registered(db, event_id, profile.id):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="You are already registered for this event")
+        raise AppError(ALREADY_REGISTERED, "You are already registered for this event", status_code=409)
 
     remaining = await spots_remaining(db, event, rules)
     if remaining is not None and remaining <= 0:
@@ -84,7 +86,11 @@ async def create_registration(
 
         registration = Registration(event_id=event_id, profile_id=profile.id, status=RegistrationStatus.PENDING)
         db.add(registration)
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            raise AppError(ALREADY_REGISTERED, "You are already registered for this event", status_code=409)
         return await get_registration_or_404(db, registration.id)
 
     # TEAM
@@ -109,7 +115,11 @@ async def create_registration(
     registration = Registration(event_id=event_id, team_id=team.id, status=RegistrationStatus.PENDING)
     db.add(registration)
 
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise AppError(ALREADY_REGISTERED, "You are already registered for this event", status_code=409)
     return await get_registration_or_404(db, registration.id)
 
 

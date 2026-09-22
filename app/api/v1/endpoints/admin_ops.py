@@ -40,6 +40,7 @@ from app.schemas.admin_ops import (
 )
 from app.services import admin_ops_service as ops
 from app.services.registration_service import _already_registered
+from app.services.event_service import invalidate_events_list_cache
 
 router = APIRouter(prefix="/admin", tags=["Admin Operations"])
 
@@ -69,6 +70,7 @@ async def create_event(
 ):
     event = Event(
         name=body.name,
+        tagline=body.tagline,
         short_desc=body.short_desc,
         long_desc=body.long_desc,
         category=body.category,
@@ -106,6 +108,7 @@ async def create_event(
     await db.commit()
     await db.refresh(event)
     await db.refresh(rules)
+    invalidate_events_list_cache()
     return _success(ops.event_to_dict(event, rules))
 
 
@@ -122,6 +125,7 @@ async def patch_event(
     await db.commit()
     await db.refresh(event)
     await db.refresh(rules)
+    invalidate_events_list_cache()
     return _success(ops.event_to_dict(event, rules))
 
 
@@ -141,6 +145,7 @@ async def patch_registration_rules(
         ops.apply_registration_mode_to_rules(rules, mode)
     await db.commit()
     await db.refresh(rules)
+    invalidate_events_list_cache()
     return _success(ops.event_to_dict(event, rules))
 
 
@@ -153,6 +158,7 @@ async def close_event(
     event, rules = await ops.get_event_with_rules(db, event_id)
     event.status = EventStatus.CLOSED
     await db.commit()
+    invalidate_events_list_cache()
     return _success({"event_id": event.id, "status": event.status})
 
 
@@ -165,6 +171,7 @@ async def open_event(
     event, rules = await ops.get_event_with_rules(db, event_id)
     event.status = EventStatus.OPEN
     await db.commit()
+    invalidate_events_list_cache()
     return _success({"event_id": event.id, "status": event.status})
 
 

@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.enums import (
     CapacityType,
+    EventCategory,
     EventSlot,
     EventStatus,
     MemberRegistrationMode,
@@ -20,9 +21,10 @@ from app.models.enums import (
 
 class AdminEventCreate(BaseModel):
     name: str = Field(min_length=1, max_length=300)
+    tagline: Optional[str] = Field(default=None, max_length=300)
     short_desc: Optional[str] = None
     long_desc: Optional[str] = None
-    category: Optional[str] = None
+    category: Optional[EventCategory] = None
     coordinator: Optional[str] = None
     coord_contact: Optional[str] = None
     fee: Optional[Decimal] = None
@@ -48,9 +50,10 @@ class AdminEventCreate(BaseModel):
 
 class AdminEventUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=300)
+    tagline: Optional[str] = Field(default=None, max_length=300)
     short_desc: Optional[str] = None
     long_desc: Optional[str] = None
-    category: Optional[str] = None
+    category: Optional[EventCategory] = None
     coordinator: Optional[str] = None
     coord_contact: Optional[str] = None
     fee: Optional[Decimal] = None
