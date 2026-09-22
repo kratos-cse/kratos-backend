@@ -150,6 +150,24 @@ async def apply_payment_success(
         await confirm_team_registration(db, payment.id, payment.payer_profile_id)
 
     await _run_handoffs(db, row)
+
+    from app.services import audit_service
+
+    await audit_service.log_activity(
+        db,
+        action="PAYMENT_CONFIRMED",
+        resource_type="PAYMENT",
+        resource_id=row.id,
+        actor_profile_id=row.payer_profile_id,
+        actor_role="SYSTEM",
+        status="SUCCESS",
+        details={
+            "payment_type": row.payment_type.value,
+            "amount_paise": row.amount_paise,
+            "razorpay_payment_id": razorpay_payment_id,
+        },
+    )
+
     await db.commit()
     await notification_service.notify_payment_confirmed(db, row.id)
     return ApplyResult(applied=True, payment=row)
@@ -164,5 +182,19 @@ async def apply_payment_failure(db: AsyncSession, payment_id: UUID) -> ApplyResu
     )
     if payment is None:
         return ApplyResult(applied=False, payment=None)
+
+    from app.services import audit_service
+
+    await audit_service.log_activity(
+        db,
+        action="PAYMENT_FAILED",
+        resource_type="PAYMENT",
+        resource_id=payment_id,
+        actor_profile_id=payment.payer_profile_id,
+        actor_role="SYSTEM",
+        status="FAILURE",
+        details={"payment_id": str(payment_id)},
+    )
+
     await db.commit()
     return ApplyResult(applied=True, payment=_as_row(payment))

@@ -25,8 +25,23 @@ async def update_my_profile(
     Note: this never touches USERS.email — that stays the Google auth
     identity. contact_email here is the separate, editable field.
     """
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    updates = payload.model_dump(exclude_unset=True)
+    for field, value in updates.items():
         setattr(profile, field, value)
+
+    from app.services import audit_service
+
+    await audit_service.log_activity(
+        db,
+        action="PROFILE_UPDATED",
+        resource_type="PROFILE",
+        resource_id=profile.id,
+        actor_user_id=profile.user_id,
+        actor_profile_id=profile.id,
+        actor_role="PARTICIPANT",
+        status="SUCCESS",
+        details={"updated_fields": list(updates.keys())},
+    )
 
     await db.commit()
     await db.refresh(profile)

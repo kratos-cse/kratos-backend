@@ -43,6 +43,20 @@ async def google_login(payload: GoogleAuthRequest, db: AsyncSession = Depends(ge
         db.add(profile)
         await db.flush()
 
+    from app.services import audit_service
+
+    await audit_service.log_activity(
+        db,
+        action="AUTH_LOGIN",
+        resource_type="USER",
+        resource_id=user.id,
+        actor_user_id=user.id,
+        actor_profile_id=profile.id,
+        actor_role="PARTICIPANT",
+        status="SUCCESS",
+        details={"email": user.email},
+    )
+
     await db.commit()
     await db.refresh(user)
     await db.refresh(profile)
@@ -74,6 +88,15 @@ async def logout(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
     current_user: User = Depends(get_current_user),  # ensures the token is valid before we bother revoking it
 ):
+    from app.services import audit_service
+
     payload = decode_token(credentials.credentials)
     revoke_token(payload["jti"])
+    audit_service.log_activity_bg(
+        action="AUTH_LOGOUT",
+        resource_type="USER",
+        resource_id=current_user.id,
+        actor_user_id=current_user.id,
+        status="SUCCESS",
+    )
     return None

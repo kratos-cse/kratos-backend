@@ -10,10 +10,34 @@ from app.models.admin import SUPER_ADMIN_ROLE_NAME, AdminUser, Role
 from app.models.user import User
 
 
+import time
+from typing import Optional
+from uuid import UUID
+
+_ADMIN_CACHE: dict[UUID, tuple[AdminUser, float]] = {}
+_CACHE_TTL_SECONDS = 60.0
+
+
+def invalidate_admin_cache(user_id: Optional[UUID] = None) -> None:
+    """Invalidates the admin permissions cache."""
+    global _ADMIN_CACHE
+    if user_id:
+        _ADMIN_CACHE.pop(user_id, None)
+    else:
+        _ADMIN_CACHE.clear()
+
+
 async def get_current_active_admin(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> AdminUser:
+    now = time.monotonic()
+    cached = _ADMIN_CACHE.get(current_user.id)
+    if cached is not None:
+        admin_obj, expire_at = cached
+        if now < expire_at:
+            return admin_obj
+
     result = await db.execute(
         select(AdminUser)
         .options(selectinload(AdminUser.role).selectinload(Role.permissions))
@@ -25,6 +49,8 @@ async def get_current_active_admin(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have active administrative privileges.",
         )
+
+    _ADMIN_CACHE[current_user.id] = (admin, now + _CACHE_TTL_SECONDS)
     return admin
 
 

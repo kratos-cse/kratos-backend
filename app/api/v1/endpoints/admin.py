@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.api.deps_admin import get_current_active_admin, require_super_admin
+from app.api.deps_admin import get_current_active_admin, invalidate_admin_cache, require_super_admin
 from app.db.session import get_db
 from app.models.admin import AdminUser, Permission, Role
 from app.models.user import User
@@ -116,6 +116,8 @@ async def update_role(
         await db.rollback()
         raise HTTPException(status_code=400, detail="Role update failed. Name might exist.")
 
+    invalidate_admin_cache()
+
     result = await db.execute(
         select(Permission).where(Permission.role_id == role_id)
     )
@@ -156,7 +158,7 @@ async def list_admin_users(
 async def grant_admin_access(
     admin_in: AdminUserCreate,
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_super_admin),
+    current_admin: AdminUser = Depends(require_super_admin),
 ):
     user = await db.execute(select(User).where(User.id == admin_in.user_id))
     if not user.scalar_one_or_none():
@@ -174,6 +176,22 @@ async def grant_admin_access(
         await db.rollback()
         raise HTTPException(status_code=400, detail="User is already an admin.")
 
+    invalidate_admin_cache(admin_in.user_id)
+
+    from app.services import audit_service
+
+    await audit_service.log_activity(
+        db,
+        action="ADMIN_ACCESS_GRANTED",
+        resource_type="ADMIN_USER",
+        resource_id=new_admin.id,
+        actor_user_id=current_admin.user_id,
+        actor_role="SUPER_ADMIN",
+        status="SUCCESS",
+        details={"user_id": str(admin_in.user_id), "role_id": str(admin_in.role_id)},
+    )
+    await db.commit()
+
     return {
         "status": "success",
         "data": {"admin_user_id": new_admin.id, "is_active": new_admin.is_active},
@@ -185,7 +203,7 @@ async def update_admin_user(
     admin_user_id: UUID,
     admin_in: AdminUserUpdate,
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_super_admin),
+    current_admin: AdminUser = Depends(require_super_admin),
 ):
     result = await db.execute(select(AdminUser).where(AdminUser.id == admin_user_id))
     admin = result.scalar_one_or_none()
@@ -202,6 +220,22 @@ async def update_admin_user(
         admin.is_active = admin_in.is_active
 
     await db.commit()
+    invalidate_admin_cache(admin.user_id)
+
+    from app.services import audit_service
+
+    await audit_service.log_activity(
+        db,
+        action="ADMIN_USER_UPDATED",
+        resource_type="ADMIN_USER",
+        resource_id=admin.id,
+        actor_user_id=current_admin.user_id,
+        actor_role="SUPER_ADMIN",
+        status="SUCCESS",
+        details={"role_id": str(admin.role_id), "is_active": admin.is_active},
+    )
+    await db.commit()
+
     return {
         "status": "success",
         "data": {"admin_user_id": admin.id, "is_active": admin.is_active},

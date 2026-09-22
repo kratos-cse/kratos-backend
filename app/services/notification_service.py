@@ -78,6 +78,7 @@ async def _send_smtp(to_email: str, subject: str, body: str) -> tuple[bool, Opti
 
 async def _deliver_notification_bg(notification_id: UUID, to_email: str, subject: str, body: str) -> None:
     from app.db.session import AsyncSessionLocal
+    from app.services import audit_service
 
     ok, err = await _send_smtp(to_email, subject, body)
     try:
@@ -89,9 +90,57 @@ async def _deliver_notification_bg(notification_id: UUID, to_email: str, subject
                     notif.status = NotificationStatus.SENT
                     notif.sent_at = datetime.now(timezone.utc)
                     notif.error = None
+                    await audit_service.log_activity(
+                        session,
+                        action="EMAIL_SENT_SUCCESS",
+                        resource_type="NOTIFICATION",
+                        resource_id=notification_id,
+                        actor_profile_id=notif.profile_id,
+                        actor_role="SYSTEM",
+                        status="SUCCESS",
+                        details={
+                            "to_email": to_email,
+                            "subject": subject,
+                            "kind": notif.kind.value if hasattr(notif.kind, "value") else str(notif.kind),
+                            "payment_id": str(notif.payment_id) if notif.payment_id else None,
+                        },
+                    )
                 else:
                     notif.status = NotificationStatus.FAILED
                     notif.error = err
+                    # Categorize failure diagnostic
+                    err_str = err or "Unknown delivery error"
+                    if "SMTP not configured" in err_str:
+                        category = "SMTP_UNCONFIGURED"
+                        diag = "SMTP_HOST or SMTP_FROM is not set in backend environment variables."
+                    elif "timeout" in err_str.lower() or "timed out" in err_str.lower():
+                        category = "SMTP_TIMEOUT"
+                        diag = "SMTP server connection timed out after 3.0s."
+                    elif any(w in err_str.lower() for w in ("auth", "login", "credentials", "password", "535")):
+                        category = "SMTP_AUTH_ERROR"
+                        diag = "SMTP server rejected authentication credentials."
+                    else:
+                        category = "SMTP_DELIVERY_ERROR"
+                        diag = err_str
+
+                    await audit_service.log_activity(
+                        session,
+                        action="EMAIL_DELIVERY_FAILED",
+                        resource_type="NOTIFICATION",
+                        resource_id=notification_id,
+                        actor_profile_id=notif.profile_id,
+                        actor_role="SYSTEM",
+                        status="FAILURE",
+                        details={
+                            "category": category,
+                            "diagnostic": diag,
+                            "error": err_str,
+                            "to_email": to_email,
+                            "subject": subject,
+                            "kind": notif.kind.value if hasattr(notif.kind, "value") else str(notif.kind),
+                            "payment_id": str(notif.payment_id) if notif.payment_id else None,
+                        },
+                    )
                 await session.commit()
     except Exception as exc:
         logger.warning("Failed to update notification status for %s: %s", notification_id, exc)
@@ -110,6 +159,8 @@ async def create_and_send(
     registration_id: Optional[UUID] = None,
     team_id: Optional[UUID] = None,
 ) -> Notification:
+    from app.services import audit_service
+
     notification = Notification(
         profile_id=profile_id,
         kind=kind,
@@ -129,8 +180,41 @@ async def create_and_send(
     if not to_email:
         notification.status = NotificationStatus.FAILED
         notification.error = "No contact email for profile"
+        await audit_service.log_activity(
+            db,
+            action="EMAIL_DELIVERY_FAILED",
+            resource_type="NOTIFICATION",
+            resource_id=notification.id,
+            actor_profile_id=profile_id,
+            actor_role="SYSTEM",
+            status="FAILURE",
+            details={
+                "category": "MISSING_RECIPIENT_EMAIL",
+                "diagnostic": "Profile has no contact email and associated user has no email address.",
+                "error": "No contact email for profile",
+                "subject": subject,
+                "kind": kind.value if hasattr(kind, "value") else str(kind),
+                "payment_id": str(payment_id) if payment_id else None,
+            },
+        )
         await db.commit()
         return notification
+
+    await audit_service.log_activity(
+        db,
+        action="EMAIL_QUEUED",
+        resource_type="NOTIFICATION",
+        resource_id=notification.id,
+        actor_profile_id=profile_id,
+        actor_role="SYSTEM",
+        status="PENDING",
+        details={
+            "to_email": to_email,
+            "subject": subject,
+            "kind": kind.value if hasattr(kind, "value") else str(kind),
+            "payment_id": str(payment_id) if payment_id else None,
+        },
+    )
 
     await db.commit()
     await db.refresh(notification)
@@ -141,6 +225,8 @@ async def create_and_send(
 
 
 async def resend(db: AsyncSession, notification_id: UUID) -> Notification:
+    from app.services import audit_service
+
     result = await db.execute(select(Notification).where(Notification.id == notification_id))
     notification = result.scalar_one_or_none()
     if notification is None:
@@ -155,8 +241,38 @@ async def resend(db: AsyncSession, notification_id: UUID) -> Notification:
     if not to_email:
         notification.status = NotificationStatus.FAILED
         notification.error = "No contact email for profile"
+        await audit_service.log_activity(
+            db,
+            action="EMAIL_DELIVERY_FAILED",
+            resource_type="NOTIFICATION",
+            resource_id=notification.id,
+            actor_profile_id=notification.profile_id,
+            actor_role="SYSTEM",
+            status="FAILURE",
+            details={
+                "category": "MISSING_RECIPIENT_EMAIL",
+                "diagnostic": "Profile has no contact email and associated user has no email address.",
+                "error": "No contact email for profile",
+                "subject": notification.subject,
+                "kind": notification.kind.value if hasattr(notification.kind, "value") else str(notification.kind),
+            },
+        )
         await db.commit()
         return notification
+
+    await audit_service.log_activity(
+        db,
+        action="EMAIL_RESEND_QUEUED",
+        resource_type="NOTIFICATION",
+        resource_id=notification.id,
+        actor_profile_id=notification.profile_id,
+        actor_role="SYSTEM",
+        status="PENDING",
+        details={
+            "to_email": to_email,
+            "subject": notification.subject,
+        },
+    )
 
     await db.commit()
     await db.refresh(notification)

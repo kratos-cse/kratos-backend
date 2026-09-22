@@ -84,6 +84,22 @@ async def create_registration(
 
         registration = Registration(event_id=event_id, profile_id=profile.id, status=RegistrationStatus.PENDING)
         db.add(registration)
+        await db.flush()
+
+        from app.services import audit_service
+
+        await audit_service.log_activity(
+            db,
+            action="REGISTRATION_CREATED",
+            resource_type="REGISTRATION",
+            resource_id=registration.id,
+            actor_user_id=profile.user_id,
+            actor_profile_id=profile.id,
+            actor_role="PARTICIPANT",
+            status="SUCCESS",
+            details={"event_id": str(event_id), "type": "SOLO"},
+        )
+
         await db.commit()
         return await get_registration_or_404(db, registration.id)
 
@@ -108,6 +124,21 @@ async def create_registration(
 
     registration = Registration(event_id=event_id, team_id=team.id, status=RegistrationStatus.PENDING)
     db.add(registration)
+    await db.flush()
+
+    from app.services import audit_service
+
+    await audit_service.log_activity(
+        db,
+        action="REGISTRATION_CREATED",
+        resource_type="REGISTRATION",
+        resource_id=registration.id,
+        actor_user_id=profile.user_id,
+        actor_profile_id=profile.id,
+        actor_role="PARTICIPANT",
+        status="SUCCESS",
+        details={"event_id": str(event_id), "type": "TEAM", "team_id": str(team.id), "team_name": team.name},
+    )
 
     await db.commit()
     return await get_registration_or_404(db, registration.id)
@@ -235,6 +266,24 @@ async def cancel_unpaid_registration(
             if member.status not in (TeamMemberStatus.LEFT, TeamMemberStatus.REMOVED):
                 member.status = TeamMemberStatus.REMOVED
                 await qr_service.deactivate_for_team_member(db, member.id)
+
+    from app.services import audit_service
+
+    await audit_service.log_activity(
+        db,
+        action="REGISTRATION_CANCELLED",
+        resource_type="REGISTRATION",
+        resource_id=registration.id,
+        actor_user_id=profile.user_id,
+        actor_profile_id=profile.id,
+        actor_role="ADMIN" if is_admin else "PARTICIPANT",
+        status="SUCCESS",
+        details={
+            "event_id": str(registration.event_id),
+            "team_id": str(registration.team_id) if registration.team_id else None,
+            "was_admin": is_admin,
+        },
+    )
 
     await db.commit()
     return await get_registration_or_404(db, registration.id)

@@ -150,6 +150,26 @@ async def create_order(
         registration_id=body.registration_id,
     )
 
+    from app.services import audit_service
+
+    await audit_service.log_activity(
+        db,
+        action="PAYMENT_ORDER_CREATED",
+        resource_type="PAYMENT",
+        resource_id=payment.id,
+        actor_user_id=payer.user_id,
+        actor_profile_id=payer.id,
+        actor_role="PARTICIPANT",
+        status="SUCCESS",
+        details={
+            "event_id": str(body.event_id),
+            "payment_type": body.payment_type,
+            "amount_paise": amount_paise,
+            "razorpay_order_id": payment.razorpay_order_id,
+            "registration_id": str(body.registration_id) if body.registration_id else None,
+        },
+    )
+
     await db.commit()
     await db.refresh(payment)
 
@@ -168,6 +188,8 @@ async def verify_payment(
     db: AsyncSession = Depends(get_db),
     payer: Profile = Depends(get_current_profile),
 ):
+    from app.services import audit_service
+
     result = await db.execute(
         select(Payment).where(Payment.razorpay_order_id == body.razorpay_order_id)
     )
@@ -187,7 +209,38 @@ async def verify_payment(
         key_secret=settings.RAZORPAY_KEY_SECRET,
     )
     if not valid:
+        await audit_service.log_activity(
+            db,
+            action="PAYMENT_VERIFY_FAILED",
+            resource_type="PAYMENT",
+            resource_id=payment.id,
+            actor_user_id=payer.user_id,
+            actor_profile_id=payer.id,
+            actor_role="PARTICIPANT",
+            status="FAILURE",
+            details={
+                "razorpay_order_id": body.razorpay_order_id,
+                "razorpay_payment_id": body.razorpay_payment_id,
+                "reason": "Invalid Razorpay checkout signature",
+            },
+        )
+        await db.commit()
         raise HTTPException(status_code=400, detail="Invalid signature")
+
+    await audit_service.log_activity(
+        db,
+        action="PAYMENT_VERIFY_SUCCESS",
+        resource_type="PAYMENT",
+        resource_id=payment.id,
+        actor_user_id=payer.user_id,
+        actor_profile_id=payer.id,
+        actor_role="PARTICIPANT",
+        status="SUCCESS",
+        details={
+            "razorpay_order_id": body.razorpay_order_id,
+            "razorpay_payment_id": body.razorpay_payment_id,
+        },
+    )
 
     applied = await apply_payment_success(db, payment.id, body.razorpay_payment_id)
     return {"paymentId": str(payment.id), "applied": applied.applied, "status": "PAID"}
@@ -195,6 +248,8 @@ async def verify_payment(
 
 @router.post("/payments/webhook")
 async def payments_webhook(request: Request, db: AsyncSession = Depends(get_db)):
+    from app.services import audit_service
+
     raw_body = await request.body()
     signature = request.headers.get("x-razorpay-signature")
     if not signature:
@@ -224,6 +279,20 @@ async def payments_webhook(request: Request, db: AsyncSession = Depends(get_db))
     payment = result.scalar_one_or_none()
     if not payment:
         return {"received": True, "applied": False, "reason": "unknown order"}
+
+    await audit_service.log_activity(
+        db,
+        action="PAYMENT_WEBHOOK_RECEIVED",
+        resource_type="PAYMENT",
+        resource_id=payment.id,
+        actor_role="WEBHOOK",
+        status="SUCCESS",
+        details={
+            "event": event.get("event"),
+            "order_id": order_id,
+            "razorpay_payment_id": entity.get("id"),
+        },
+    )
 
     if event.get("event") == "payment.captured":
         applied = await apply_payment_success(db, payment.id, entity["id"])
@@ -327,7 +396,7 @@ async def admin_refund(
     payment_id: UUID,
     body: RefundBody,
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_super_admin),
+    admin: AdminUser = Depends(require_super_admin),
 ):
     if not body.reason:
         raise HTTPException(status_code=400, detail="reason is required")
@@ -335,6 +404,25 @@ async def admin_refund(
         result = await refund_payment(db, payment_id, body.reason)
     except RefundError as err:
         raise HTTPException(status_code=err.status, detail=str(err))
+
+    from app.services import audit_service
+
+    await audit_service.log_activity(
+        db,
+        action="PAYMENT_REFUNDED",
+        resource_type="PAYMENT",
+        resource_id=payment_id,
+        actor_user_id=admin.user_id,
+        actor_role="SUPER_ADMIN",
+        status="SUCCESS",
+        details={
+            "reason": body.reason,
+            "refund_id": result.refund_id,
+            "refund_amount_paise": result.refund_amount_paise,
+        },
+    )
+    await db.commit()
+
     return {
         "paymentId": str(result.payment_id),
         "refundId": result.refund_id,

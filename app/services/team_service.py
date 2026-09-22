@@ -175,6 +175,20 @@ async def create_team(db: AsyncSession, event_id: uuid.UUID, profile: Profile, n
         )
     )
 
+    from app.services import audit_service
+
+    await audit_service.log_activity(
+        db,
+        action="TEAM_CREATED",
+        resource_type="TEAM",
+        resource_id=team.id,
+        actor_user_id=profile.user_id,
+        actor_profile_id=profile.id,
+        actor_role="PARTICIPANT",
+        status="SUCCESS",
+        details={"event_id": str(event_id), "team_name": team.name},
+    )
+
     try:
         await db.commit()
     except Exception:
@@ -339,6 +353,20 @@ async def join_via_invitation(db: AsyncSession, invite_code: str, profile: Profi
     member_profile_id = profile.id
     team_id = team.id
 
+    from app.services import audit_service
+
+    await audit_service.log_activity(
+        db,
+        action="TEAM_MEMBER_JOINED",
+        resource_type="TEAM",
+        resource_id=team.id,
+        actor_user_id=profile.user_id,
+        actor_profile_id=profile.id,
+        actor_role="PARTICIPANT",
+        status="SUCCESS",
+        details={"team_name": team.name, "member_id": str(member.id), "event_id": str(team.event_id)},
+    )
+
     try:
         await db.commit()
     except Exception:
@@ -385,6 +413,21 @@ async def leave_team(
     if member.status in _TERMINAL:
         return await _to_member_out(db, member)
     member.status = TeamMemberStatus.LEFT
+
+    from app.services import audit_service
+
+    await audit_service.log_activity(
+        db,
+        action="TEAM_MEMBER_LEFT",
+        resource_type="TEAM",
+        resource_id=team.id,
+        actor_user_id=profile.user_id,
+        actor_profile_id=profile.id,
+        actor_role="PARTICIPANT",
+        status="SUCCESS",
+        details={"member_id": str(member.id), "team_name": team.name},
+    )
+
     await db.commit()
     await db.refresh(member)
     return await _to_member_out(db, member)
@@ -410,6 +453,21 @@ async def remove_member(
     if member.status in _TERMINAL:
         return await _to_member_out(db, member)
     member.status = TeamMemberStatus.REMOVED
+
+    from app.services import audit_service
+
+    await audit_service.log_activity(
+        db,
+        action="TEAM_MEMBER_REMOVED",
+        resource_type="TEAM",
+        resource_id=team.id,
+        actor_user_id=profile.user_id,
+        actor_profile_id=profile.id,
+        actor_role="PARTICIPANT",
+        status="SUCCESS",
+        details={"member_id": str(member.id), "team_name": team.name},
+    )
+
     await db.commit()
     await db.refresh(member)
     return await _to_member_out(db, member)
