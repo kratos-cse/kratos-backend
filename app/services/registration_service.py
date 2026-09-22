@@ -14,12 +14,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.enums import RegistrationStatus, TeamMemberRole, TeamMemberStatus, TeamStatus
+from app.models.enums import PaymentStatus, RegistrationStatus, TeamMemberRole, TeamMemberStatus, TeamStatus
 from app.models.event import Event, EventRegistrationRule
 from app.models.profile import Profile
 from app.models.registration import Registration
 from app.models.team import Team, TeamMember
 from app.schemas.registration import RegistrationCreateRequest, RegistrationType
+from app.services import qr_service
 from app.services.event_service import is_registration_open, spots_remaining
 
 _REGISTRATION_LOAD_OPTS = (
@@ -164,3 +165,75 @@ async def list_my_registrations(db: AsyncSession, profile: Profile) -> list[Regi
         team_regs = list(team_reg_result.scalars().all())
 
     return solo_regs + team_regs
+
+
+async def cancel_unpaid_registration(
+    db: AsyncSession,
+    registration_id: uuid.UUID,
+    profile: Profile,
+    is_admin: bool = False,
+) -> Registration:
+    result = await db.execute(
+        select(Registration)
+        .options(*_REGISTRATION_LOAD_OPTS)
+        .where(Registration.id == registration_id)
+        .with_for_update()
+    )
+    registration = result.scalar_one_or_none()
+    if registration is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Registration not found")
+
+    # Authorization check: only owner (or team leader for team reg) or admin can cancel
+    if not is_admin:
+        if registration.profile_id is not None:
+            if registration.profile_id != profile.id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You do not have permission to cancel this registration",
+                )
+        elif registration.team_id is not None:
+            if registration.team is None or registration.team.leader_profile_id != profile.id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Only the team leader can cancel this registration",
+                )
+
+    # Status / Payment validity check
+    if registration.status == RegistrationStatus.CONFIRMED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot cancel a confirmed registration. Please contact the organizers.",
+        )
+
+    if registration.payment and registration.payment.status == PaymentStatus.PAID:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot cancel a paid registration.",
+        )
+
+    if registration.status == RegistrationStatus.CANCELLED:
+        return registration
+
+    registration.status = RegistrationStatus.CANCELLED
+    await qr_service.deactivate_for_registration(db, registration.id)
+
+    if registration.payment and registration.payment.status == PaymentStatus.CREATED:
+        registration.payment.status = PaymentStatus.FAILED
+
+    if registration.team_id is not None:
+        team_result = await db.execute(select(Team).where(Team.id == registration.team_id).with_for_update())
+        team = team_result.scalar_one_or_none()
+        if team and team.status != TeamStatus.CANCELLED:
+            team.status = TeamStatus.CANCELLED
+
+        members_result = await db.execute(
+            select(TeamMember).where(TeamMember.team_id == registration.team_id)
+        )
+        for member in members_result.scalars().all():
+            if member.status not in (TeamMemberStatus.LEFT, TeamMemberStatus.REMOVED):
+                member.status = TeamMemberStatus.REMOVED
+                await qr_service.deactivate_for_team_member(db, member.id)
+
+    await db.commit()
+    return await get_registration_or_404(db, registration.id)
+
