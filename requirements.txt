@@ -27,6 +27,7 @@ aiosmtplib>=3.0,<4.0
 
 # --- Receipts ---
 reportlab==4.5.1
+qrcode>=8.0
 
 # --- Admin exports ---
 openpyxl>=3.1,<4.0

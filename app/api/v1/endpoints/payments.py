@@ -5,6 +5,7 @@ from typing import Literal, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -389,6 +390,75 @@ async def sync_payment_status(
         "razorpay_order_id": payment.razorpay_order_id,
         "razorpay_payment_id": payment.razorpay_payment_id,
     }
+
+
+@router.get("/payments/{payment_id}/receipt")
+async def get_payment_receipt(
+    payment_id: UUID,
+    request: Request,
+    format: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+    payer: Profile = Depends(get_current_profile),
+):
+    from fastapi.responses import HTMLResponse
+    from app.schemas.registration import ReceiptOut
+    from app.services.receipt_service import ensure_receipt, get_receipt_data_context, render_html_receipt
+
+    result = await db.execute(select(Payment).where(Payment.id == payment_id))
+    payment = result.scalar_one_or_none()
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+
+    if payment.payer_profile_id != payer.id:
+        admin_result = await db.execute(
+            select(AdminUser).where(AdminUser.user_id == payer.user_id, AdminUser.is_active.is_(True))
+        )
+        if admin_result.scalar_one_or_none() is None:
+            raise HTTPException(status_code=403, detail="Not your payment")
+
+    receipt = await ensure_receipt(db, payment_id)
+    await db.commit()
+
+    accept_header = request.headers.get("accept", "")
+    if format == "html" or ("text/html" in accept_header and "application/json" not in accept_header):
+        ctx = await get_receipt_data_context(db, payment_id)
+        return HTMLResponse(content=render_html_receipt(ctx), media_type="text/html")
+
+    return ReceiptOut(
+        id=receipt.id,
+        receipt_number=receipt.receipt_number,
+        pdf_url=receipt.pdf_url,
+        html_url=receipt.pdf_url,
+        issued_at=receipt.issued_at,
+    )
+
+
+@router.get("/payments/{payment_id}/receipt/html")
+async def get_payment_receipt_html(
+    payment_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    payer: Profile = Depends(get_current_profile),
+):
+    from fastapi.responses import HTMLResponse
+    from app.services.receipt_service import ensure_receipt, get_receipt_data_context, render_html_receipt
+
+    result = await db.execute(select(Payment).where(Payment.id == payment_id))
+    payment = result.scalar_one_or_none()
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+
+    if payment.payer_profile_id != payer.id:
+        admin_result = await db.execute(
+            select(AdminUser).where(AdminUser.user_id == payer.user_id, AdminUser.is_active.is_(True))
+        )
+        if admin_result.scalar_one_or_none() is None:
+            raise HTTPException(status_code=403, detail="Not your payment")
+
+    await ensure_receipt(db, payment_id)
+    await db.commit()
+
+    ctx = await get_receipt_data_context(db, payment_id)
+    return HTMLResponse(content=render_html_receipt(ctx), media_type="text/html")
 
 
 @router.post("/admin/payments/{payment_id}/refund")
