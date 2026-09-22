@@ -217,8 +217,11 @@ async def cancel_unpaid_registration(
     registration.status = RegistrationStatus.CANCELLED
     await qr_service.deactivate_for_registration(db, registration.id)
 
+    # Mark unpaid CREATED payments failed and unlink so a late Razorpay capture
+    # cannot re-CONFIRM this cancelled registration via payment_id.
     if registration.payment and registration.payment.status == PaymentStatus.CREATED:
         registration.payment.status = PaymentStatus.FAILED
+    registration.payment_id = None
 
     if registration.team_id is not None:
         team_result = await db.execute(select(Team).where(Team.id == registration.team_id).with_for_update())

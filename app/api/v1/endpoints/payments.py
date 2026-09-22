@@ -1,5 +1,6 @@
 """Payment HTTP routes — async SQLAlchemy + Authentication JWT deps."""
 import json
+import logging
 import uuid
 from typing import Literal, Optional
 from uuid import UUID
@@ -27,6 +28,7 @@ from app.payments.refund import RefundError, refund_payment
 from app.payments.signatures import verify_checkout_signature, verify_webhook_signature
 
 router = APIRouter(tags=["Payments"])
+logger = logging.getLogger(__name__)
 
 PaymentTypeLiteral = Literal["TEAM_REGISTRATION", "SOLO_REGISTRATION"]
 
@@ -252,7 +254,11 @@ async def _sync_payment_if_needed(db: AsyncSession, payment: Payment) -> Payment
                         await db.refresh(payment)
                         break
         except Exception:
-            pass
+            logger.exception(
+                "Payment sync failed for payment_id=%s order_id=%s",
+                payment.id,
+                payment.razorpay_order_id,
+            )
     return payment
 
 
