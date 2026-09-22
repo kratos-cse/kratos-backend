@@ -131,6 +131,8 @@ async def assert_can_view_registration(
     if registration.profile_id == profile.id:
         return
     if registration.team_id is not None:
+        if registration.team and registration.team.leader_profile_id == profile.id:
+            return
         result = await db.execute(
             select(TeamMember).where(
                 TeamMember.team_id == registration.team_id,
