@@ -22,7 +22,9 @@ _REGISTRATION_MODE_VALUES = ["INDIVIDUAL_ONLY", "TEAM_ONLY", "TEAM_OR_INDIVIDUAL
 
 def upgrade() -> None:
     bind = op.get_bind()
-    registration_mode = postgresql.ENUM(*_REGISTRATION_MODE_VALUES, name="registration_mode")
+    registration_mode = postgresql.ENUM(
+        *_REGISTRATION_MODE_VALUES, name="registration_mode", create_type=False
+    )
     registration_mode.create(bind, checkfirst=True)
 
     op.add_column(

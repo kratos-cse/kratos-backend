@@ -117,17 +117,18 @@ def upgrade() -> None:
     op.create_index("ix_admin_users_role_id", "admin_users", ["role_id"])
 
     # Seed SUPER ADMIN role so bootstrap can grant the first admin_user.
+    # Cast to uuid — asyncpg binds Python strings as VARCHAR otherwise.
     op.execute(
         sa.text(
             "INSERT INTO roles (id, name, description) VALUES "
-            "(CAST(:id AS UUID), 'SUPER ADMIN', 'Full system access — seeded by migration 0003')"
+            "(CAST(:id AS uuid), 'SUPER ADMIN', 'Full system access — seeded by migration 0003')"
         ).bindparams(id=SUPER_ADMIN_ROLE_ID)
     )
     for key in SUPER_ADMIN_PERMISSIONS:
         op.execute(
             sa.text(
                 "INSERT INTO permissions (id, role_id, permission_key) VALUES "
-                "(CAST(:id AS UUID), CAST(:role_id AS UUID), :key)"
+                "(CAST(:id AS uuid), CAST(:role_id AS uuid), :key)"
             ).bindparams(id=str(uuid.uuid4()), role_id=SUPER_ADMIN_ROLE_ID, key=key)
         )
 

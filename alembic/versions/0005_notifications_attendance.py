@@ -31,10 +31,20 @@ _DUPLICATE_SCAN_BEHAVIOR = ["REJECT", "ACCEPT", "WARN"]
 def upgrade() -> None:
     bind = op.get_bind()
 
-    notification_kind = postgresql.ENUM(*_NOTIFICATION_KIND, name="notification_kind", create_type=False)
-    notification_status = postgresql.ENUM(*_NOTIFICATION_STATUS, name="notification_status", create_type=False)
-    attendance_scan_result = postgresql.ENUM(*_ATTENDANCE_SCAN_RESULT, name="attendance_scan_result", create_type=False)
-    duplicate_scan_behavior = postgresql.ENUM(*_DUPLICATE_SCAN_BEHAVIOR, name="duplicate_scan_behavior", create_type=False)
+    # create_type=False so CREATE TABLE does not emit CREATE TYPE again
+    # (DuplicateObjectError on retry / partial previous runs).
+    notification_kind = postgresql.ENUM(
+        *_NOTIFICATION_KIND, name="notification_kind", create_type=False
+    )
+    notification_status = postgresql.ENUM(
+        *_NOTIFICATION_STATUS, name="notification_status", create_type=False
+    )
+    attendance_scan_result = postgresql.ENUM(
+        *_ATTENDANCE_SCAN_RESULT, name="attendance_scan_result", create_type=False
+    )
+    duplicate_scan_behavior = postgresql.ENUM(
+        *_DUPLICATE_SCAN_BEHAVIOR, name="duplicate_scan_behavior", create_type=False
+    )
 
     for enum_type in (
         notification_kind,

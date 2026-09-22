@@ -24,6 +24,7 @@ class Settings(BaseSettings):
 
     # --- Google OAuth (filled in by team lead) ---
     GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
 
     # --- JWT session signing ---
     JWT_SECRET_KEY: str = "dev-secret-change-me"

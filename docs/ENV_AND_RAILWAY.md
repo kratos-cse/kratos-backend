@@ -97,6 +97,10 @@ When you add a Web Service for this repo, set the same variables in Railway’s
 service **Variables** (you can reference the Postgres plugin’s `DATABASE_URL`
 with private networking). Keep `APP_PUBLIC_BASE_URL` as the public Railway HTTPS URL.
 
+**Start command:** the [Procfile](../Procfile) runs `scripts/start.sh`, which
+executes `alembic upgrade head` on **every deploy**, then starts uvicorn.
+Ensure `DATABASE_URL` is set on the web service before the first deploy.
+
 ---
 
 ## 2. Google OAuth — `GOOGLE_CLIENT_ID`
@@ -111,10 +115,13 @@ with private networking). Keep `APP_PUBLIC_BASE_URL` as the public Railway HTTPS
    - `http://localhost:3000`
    - your deployed frontend origin
 6. Copy **Client ID** → `GOOGLE_CLIENT_ID`.
+7. Copy **Client secret** → `GOOGLE_CLIENT_SECRET`  
+   (Credentials → click the OAuth Web client → Client secret / `GOCSPX-...`).
 
-**Important:** Use the **same** Client ID as the frontend Google Sign-In.
-The backend only **verifies** the `id_token`; it does not need the Client Secret
-for `POST /api/v1/auth/google`.
+**Important:** Use the **same** OAuth client as the frontend Google Sign-In.
+For the current `POST /api/v1/auth/google` flow the backend verifies the
+`id_token` with **Client ID** only. Keep `GOOGLE_CLIENT_SECRET` in `.env`
+anyway (same console page) for any future server-side code exchange.
 
 ---
 
