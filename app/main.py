@@ -1,7 +1,3 @@
-import logging
-import time
-from pathlib import Path
-
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -9,8 +5,7 @@ from fastapi.responses import JSONResponse
 from app.api.v1.router import api_router
 from app.core.config import settings
 from app.core.errors import AppError, http_code_from_detail
-
-logger = logging.getLogger("kratos.api")
+from app.core.middleware import RequestLoggingMiddleware
 
 app = FastAPI(
     title="KRATOS'26 API",
@@ -30,31 +25,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.middleware("http")
-async def request_timing(request: Request, call_next):
-    started = time.perf_counter()
-    response = await call_next(request)
-    elapsed_ms = (time.perf_counter() - started) * 1000
-    path = request.url.path
-    if path.startswith("/api/v1"):
-        logger.info(
-            "method=%s path=%s status=%s duration_ms=%.1f",
-            request.method,
-            path,
-            response.status_code,
-            elapsed_ms,
-        )
-        response.headers["X-Response-Time-Ms"] = f"{elapsed_ms:.1f}"
-    return response
-
+app.add_middleware(RequestLoggingMiddleware)
 
 app.include_router(api_router, prefix="/api/v1")
-
-# Receipt files may be written under RECEIPT_STORAGE_DIR, but are NOT publicly mounted.
-# Serve only via authenticated receipt endpoints.
-Path(settings.RECEIPT_STORAGE_DIR).mkdir(parents=True, exist_ok=True)
 
 
 @app.exception_handler(AppError)

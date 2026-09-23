@@ -1,22 +1,28 @@
-"""Payment receipt generation (HTML & PDF with embedded QR codes, idempotent per payment_id)."""
+"""Payment receipt generation (on-demand HTML/PDF; metadata only in DB)."""
 import html
 import io
+import logging
 import secrets
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import quote
 
 import qrcode
 import qrcode.image.svg
 from reportlab.lib.pagesizes import letter
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.branding.documents import render_document_header_html
 from app.core.config import settings
-from app.core.errors import FORBIDDEN, NOT_FOUND, AppError
+
+logger = logging.getLogger("receipt_service")
+from app.core.errors import FORBIDDEN, NOT_FOUND, RECEIPT_DATA_INCOMPLETE, AppError
 from app.models.enums import PaymentStatus, RegistrationStatus, TeamMemberStatus
 from app.models.event import Event
 from app.models.payment import Payment
@@ -55,73 +61,113 @@ def generate_qr_svg(data: str) -> str:
     return svg_str
 
 
-def _write_receipt_pdf(*, path: Path, payment: Payment, receipt_number: str) -> None:
-    """Generates standard PDF fallback receipt."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    c = canvas.Canvas(str(path), pagesize=letter)
+def receipt_html_url(payment_id: uuid.UUID, receipt_token: str | None = None) -> str:
+    base = settings.APP_PUBLIC_BASE_URL.rstrip("/")
+    url = f"{base}/api/v1/payments/{payment_id}/receipt/html"
+    if receipt_token:
+        url = f"{url}?receipt_token={quote(receipt_token, safe='')}"
+    return url
+
+
+def receipt_pdf_url(payment_id: uuid.UUID, receipt_token: str | None = None) -> str:
+    base = settings.APP_PUBLIC_BASE_URL.rstrip("/")
+    url = f"{base}/api/v1/payments/{payment_id}/receipt/pdf"
+    if receipt_token:
+        url = f"{url}?receipt_token={quote(receipt_token, safe='')}"
+    return url
+
+
+def render_pdf_receipt(ctx: dict[str, Any]) -> bytes:
+    """Render a branded PDF receipt in memory (never written to disk)."""
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=letter)
     width, height = letter
-    y = height - 72
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(72, y, "KRATOS'26 Payment Receipt & Event Pass")
-    y -= 36
+    y = height - 56
+
+    c.setFillColorRGB(0.06, 0.09, 0.16)
+    c.rect(0, height - 88, width, 88, fill=1, stroke=0)
+    c.setFillColorRGB(0.98, 0.98, 0.99)
+    c.setFont("Helvetica-Bold", 22)
+    c.drawString(72, height - 52, "KRATOS'26")
+    c.setFont("Helvetica", 10)
+    c.drawString(72, height - 68, "EEC · ACE · CSE")
+    c.setFillColorRGB(0.1, 0.1, 0.12)
+
+    y = height - 120
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(72, y, "Payment Confirmed")
+    y -= 24
     c.setFont("Helvetica", 11)
-    lines = [
-        f"Receipt number: {receipt_number}",
-        f"Payment ID: {payment.id}",
-        f"Type: {payment.payment_type.value}",
-        f"Amount: Rs. {payment.amount_paise / 100:.2f} {payment.currency}",
-        f"Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
-    ]
-    for line in lines:
-        c.drawString(72, y, line)
-        y -= 18
+    for label, value in [
+        ("Receipt", ctx["receipt_number"]),
+        ("Issued", ctx["issued_at_formatted"]),
+        ("Event", ctx["event_name"]),
+        ("Participant", ctx["payer_name"]),
+        ("Amount", f"₹{ctx['amount_inr']} {ctx['currency']}"),
+        ("Payment ID", ctx["payment_id"][:18] + "..."),
+    ]:
+        c.drawString(72, y, f"{label}: {value}")
+        y -= 16
+
+    if ctx.get("team_name"):
+        c.drawString(72, y, f"Team: {ctx['team_name']}")
+        y -= 16
+
+    qr_png = io.BytesIO()
+    qr_img = qrcode.make(ctx["qr_verify_url"])
+    qr_img.save(qr_png, format="PNG")
+    qr_png.seek(0)
+    c.drawImage(ImageReader(qr_png), width - 160, 96, width=96, height=96, mask="auto")
+    c.setFont("Helvetica", 9)
+    c.drawString(width - 160, 84, "Event Pass QR")
+
+    c.setFont("Helvetica", 9)
+    c.drawString(72, 72, "KRATOS'26 Organizing Committee · kratos.cse@gmail.com")
     c.showPage()
     c.save()
-
-
-def receipt_html_url(payment_id: uuid.UUID) -> str:
-    base = settings.APP_PUBLIC_BASE_URL.rstrip("/")
-    return f"{base}/api/v1/payments/{payment_id}/receipt/html"
-
-
-def receipt_pdf_url(payment_id: uuid.UUID) -> str:
-    base = settings.APP_PUBLIC_BASE_URL.rstrip("/")
-    return f"{base}/api/v1/payments/{payment_id}/receipt/pdf"
-
-
-def receipt_pdf_path(receipt_number: str) -> Path:
-    return Path(settings.RECEIPT_STORAGE_DIR) / f"{receipt_number}.pdf"
-
-
-def receipt_html_path(receipt_number: str) -> Path:
-    return Path(settings.RECEIPT_STORAGE_DIR) / f"{receipt_number}.html"
+    return buffer.getvalue()
 
 
 async def get_receipt_data_context(db: AsyncSession, payment_id: uuid.UUID) -> dict[str, Any]:
-    """Gathers complete relational data needed for rendering a rich receipt & pass."""
-    # 1. Payment
+    """Gathers complete relational data needed for rendering a rich receipt & pass.
+
+    Fails closed when required persisted data is missing — no placeholder fabrication.
+    """
     p_result = await db.execute(select(Payment).where(Payment.id == payment_id))
     payment = p_result.scalar_one_or_none()
     if not payment:
         raise AppError(NOT_FOUND, f"Payment {payment_id} not found", status_code=404)
 
-    # 2. Payer Profile & User
-    payer_name = "Participant"
-    payer_email = ""
-    payer_phone = "N/A"
-    payer_college = "N/A"
-    if payment.payer_profile_id:
-        prof_res = await db.execute(
-            select(Profile).options(selectinload(Profile.user)).where(Profile.id == payment.payer_profile_id)
+    if payment.status != PaymentStatus.PAID:
+        raise AppError(
+            FORBIDDEN,
+            "Receipt data is only available for paid payments",
+            status_code=403,
         )
-        prof = prof_res.scalar_one_or_none()
-        if prof:
-            payer_name = prof.full_name or "Participant"
-            payer_phone = prof.phone or "N/A"
-            payer_college = prof.college_name or "N/A"
-            payer_email = prof.contact_email or (prof.user.email if prof.user else "")
 
-    # 3. Registration
+    if not payment.payer_profile_id:
+        raise AppError(
+            RECEIPT_DATA_INCOMPLETE,
+            "Payment has no payer profile",
+            status_code=422,
+        )
+
+    prof_res = await db.execute(
+        select(Profile).options(selectinload(Profile.user)).where(Profile.id == payment.payer_profile_id)
+    )
+    prof = prof_res.scalar_one_or_none()
+    if not prof or not prof.full_name:
+        raise AppError(
+            RECEIPT_DATA_INCOMPLETE,
+            "Payer profile data is incomplete",
+            status_code=422,
+        )
+
+    payer_name = prof.full_name
+    payer_phone = prof.phone or ""
+    payer_college = prof.college_name or ""
+    payer_email = prof.contact_email or (prof.user.email if prof.user else "")
+
     reg_result = await db.execute(
         select(Registration)
         .options(
@@ -131,69 +177,106 @@ async def get_receipt_data_context(db: AsyncSession, payment_id: uuid.UUID) -> d
         .where(Registration.payment_id == payment_id)
     )
     registration = reg_result.scalar_one_or_none()
+    if registration is None:
+        raise AppError(
+            RECEIPT_DATA_INCOMPLETE,
+            "No registration linked to this payment",
+            status_code=422,
+        )
 
-    event_name = "KRATOS'26 Event"
-    event_category = "General"
-    event_venue = "Campus Center"
-    event_slot = "Scheduled Day"
-    whatsapp_link = None
+    if registration.status != RegistrationStatus.CONFIRMED:
+        raise AppError(
+            RECEIPT_DATA_INCOMPLETE,
+            "Registration is not confirmed",
+            status_code=422,
+        )
+
+    if registration.event is None:
+        raise AppError(
+            RECEIPT_DATA_INCOMPLETE,
+            "Registration event data is missing",
+            status_code=422,
+        )
+
+    event = registration.event
+    event_name = event.name
+    event_category = event.category.value if hasattr(event.category, "value") else str(event.category)
+    event_venue = event.venue or ""
+    if event.slot:
+        event_slot = event.slot
+    elif event.starts_at:
+        event_slot = event.starts_at.strftime("%B %d, %Y %I:%M %p")
+    else:
+        event_slot = ""
+    whatsapp_link = event.whatsapp_group_link
+
     team_name = None
     team_members: list[dict[str, str]] = []
-    qr_token = None
+    if registration.team:
+        team_name = registration.team.name
+        for m in registration.team.members:
+            if m.status not in (TeamMemberStatus.LEFT, TeamMemberStatus.REMOVED):
+                if m.profile:
+                    m_name = m.profile.full_name
+                elif m.full_name:
+                    m_name = m.full_name
+                else:
+                    raise AppError(
+                        RECEIPT_DATA_INCOMPLETE,
+                        "Team member name is missing from roster data",
+                        status_code=422,
+                    )
+                team_members.append({
+                    "name": m_name,
+                    "role": m.role.value if hasattr(m.role, "value") else str(m.role),
+                    "status": m.status.value if hasattr(m.status, "value") else str(m.status),
+                })
 
-    if registration:
-        if registration.event:
-            event_name = registration.event.name
-            event_category = registration.event.category or "General"
-            event_venue = registration.event.venue or "Campus Center"
-            event_slot = registration.event.slot or (
-                registration.event.starts_at.strftime("%B %d, %Y %I:%M %p")
-                if registration.event.starts_at
-                else "Event Schedule"
-            )
-            whatsapp_link = registration.event.whatsapp_group_link
-
-        if registration.team:
-            team_name = registration.team.name
-            for m in registration.team.members:
-                if m.status not in (TeamMemberStatus.LEFT, TeamMemberStatus.REMOVED):
-                    m_name = m.profile.full_name if m.profile else "Member"
-                    team_members.append({
-                        "name": m_name,
-                        "role": m.role.value if hasattr(m.role, "value") else str(m.role),
-                        "status": m.status.value if hasattr(m.status, "value") else str(m.status),
-                    })
-
-        # Fetch QR Code
-        if registration.profile_id:
+    qr_token: str | None = None
+    if registration.profile_id:
+        qr_res = await db.execute(
+            select(QRCode).where(QRCode.registration_id == registration.id, QRCode.is_active.is_(True))
+        )
+        qr = qr_res.scalar_one_or_none()
+        if qr:
+            qr_token = qr.token
+    elif registration.team_id:
+        leader_member = next(
+            (m for m in registration.team.members if m.profile_id == payment.payer_profile_id),
+            None,
+        )
+        if leader_member:
             qr_res = await db.execute(
-                select(QRCode).where(QRCode.registration_id == registration.id, QRCode.is_active.is_(True))
+                select(QRCode).where(QRCode.team_member_id == leader_member.id, QRCode.is_active.is_(True))
             )
             qr = qr_res.scalar_one_or_none()
             if qr:
                 qr_token = qr.token
-        elif registration.team_id:
-            # Find leader member QR
-            leader_member = next(
-                (m for m in registration.team.members if m.profile_id == payment.payer_profile_id),
-                None
-            )
-            if leader_member:
-                qr_res = await db.execute(
-                    select(QRCode).where(QRCode.team_member_id == leader_member.id, QRCode.is_active.is_(True))
-                )
-                qr = qr_res.scalar_one_or_none()
-                if qr:
-                    qr_token = qr.token
 
     if not qr_token:
-        qr_token = f"KRATOS-PAY-{payment.id.hex[:16]}"
+        raise AppError(
+            RECEIPT_DATA_INCOMPLETE,
+            "Event pass QR code is missing for this registration",
+            status_code=422,
+        )
 
-    # Fetch Receipt
     receipt_res = await db.execute(select(Receipt).where(Receipt.payment_id == payment_id))
     receipt = receipt_res.scalar_one_or_none()
-    receipt_number = receipt.receipt_number if receipt else f"KR-{payment.created_at.strftime('%Y%m%d')}-{payment.id.hex[:8].upper()}"
-    issued_at = receipt.issued_at if receipt and receipt.issued_at else (payment.created_at or datetime.now(timezone.utc))
+    if receipt is None or not receipt.receipt_number:
+        raise AppError(
+            RECEIPT_DATA_INCOMPLETE,
+            "Receipt metadata has not been issued for this payment",
+            status_code=422,
+        )
+
+    receipt_number = receipt.receipt_number
+    issued_at = receipt.issued_at or payment.created_at
+    if issued_at is None:
+        raise AppError(
+            RECEIPT_DATA_INCOMPLETE,
+            "Receipt issue timestamp is missing",
+            status_code=422,
+        )
 
     # Generate QR Code SVG
     qr_verify_url = f"{settings.APP_PUBLIC_BASE_URL.rstrip('/')}/checkin?token={qr_token}"
@@ -622,7 +705,7 @@ def render_html_receipt(ctx: dict[str, Any]) -> str:
         <div class="header">
             <div class="header-top">
                 <div>
-                    <div class="logo-title">KRATOS &apos;26</div>
+                    {render_document_header_html()}
                     <div class="sub-title">National Level Technical Symposium</div>
                 </div>
                 <div class="badge-verified">
@@ -770,10 +853,9 @@ def render_html_receipt(ctx: dict[str, Any]) -> str:
 
 
 async def ensure_receipt(db: AsyncSession, payment_id: uuid.UUID) -> Receipt:
-    """Ensures receipt record exists, generates both HTML and PDF representations on disk.
+    """Ensure receipt metadata exists for a PAID payment (HTML/PDF rendered on demand).
 
-    Receipts are issued only for PAID payments. URLs point at authenticated API
-    endpoints — files under RECEIPT_STORAGE_DIR are never publicly mounted.
+    Receipt rows store receipt_number and API URLs only — no generated files are persisted.
     """
     existing = await db.execute(select(Receipt).where(Receipt.payment_id == payment_id))
     receipt = existing.scalar_one_or_none()
@@ -793,23 +875,26 @@ async def ensure_receipt(db: AsyncSession, payment_id: uuid.UUID) -> Receipt:
         )
 
     receipt_number = _receipt_number()
-    storage_dir = Path(settings.RECEIPT_STORAGE_DIR)
-    storage_dir.mkdir(parents=True, exist_ok=True)
-
-    pdf_path = receipt_pdf_path(receipt_number)
-    _write_receipt_pdf(path=pdf_path, payment=payment, receipt_number=receipt_number)
-
-    html_path = receipt_html_path(receipt_number)
-    context = await get_receipt_data_context(db, payment_id)
-    context["receipt_number"] = receipt_number
-    rendered_html = render_html_receipt(context)
-    html_path.write_text(rendered_html, encoding="utf-8")
-
-    receipt = Receipt(
-        payment_id=payment_id,
-        receipt_number=receipt_number,
-        pdf_url=receipt_pdf_url(payment_id),
+    stmt = (
+        insert(Receipt)
+        .values(
+            payment_id=payment_id,
+            receipt_number=receipt_number,
+            pdf_url=receipt_pdf_url(payment_id),
+        )
+        .on_conflict_do_nothing(index_elements=["payment_id"])
+        .returning(Receipt)
     )
-    db.add(receipt)
-    await db.flush()
+    result = await db.execute(stmt)
+    receipt = result.scalar_one_or_none()
+    if receipt is not None:
+        logger.info("receipt_issued payment_id=%s receipt_number=%s", payment_id, receipt.receipt_number)
+        await db.flush()
+        return receipt
+
+    # Concurrent request won the insert race — fetch the existing row.
+    existing_after = await db.execute(select(Receipt).where(Receipt.payment_id == payment_id))
+    receipt = existing_after.scalar_one_or_none()
+    if receipt is None:
+        raise AppError(NOT_FOUND, "Receipt could not be created", status_code=500)
     return receipt

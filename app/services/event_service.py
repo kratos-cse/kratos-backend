@@ -85,10 +85,29 @@ async def _count_used_capacity(db: AsyncSession, event: Event, rules: Optional[E
     return solo_count + member_count
 
 
+_SPOTS_CACHE_TTL_SEC = 5.0
+_spots_cache: dict[object, tuple[float, int]] = {}
+
+
+def invalidate_spots_cache(event_id: object | None = None) -> None:
+    if event_id is not None:
+        _spots_cache.pop(event_id, None)
+    else:
+        _spots_cache.clear()
+
+
 async def spots_remaining(
     db: AsyncSession, event: Event, rules: Optional[EventRegistrationRule]
 ) -> Optional[int]:
     if event.capacity is None:
         return None
+
+    now = time.monotonic()
+    cached = _spots_cache.get(event.id)
+    if cached is not None and now < cached[0]:
+        return cached[1]
+
     used = await _count_used_capacity(db, event, rules)
-    return max(event.capacity - used, 0)
+    remaining = max(event.capacity - used, 0)
+    _spots_cache[event.id] = (now + _SPOTS_CACHE_TTL_SEC, remaining)
+    return remaining

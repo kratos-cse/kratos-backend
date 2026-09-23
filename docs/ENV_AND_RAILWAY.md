@@ -193,7 +193,7 @@ If SMTP is empty or wrong, notifications stay `FAILED` in the DB; **payments are
 |----------|---------------|---------|
 | `CORS_ORIGINS` | `http://localhost:3000` | Frontend origin(s), comma-separated |
 | `APP_PUBLIC_BASE_URL` | `http://localhost:8000` | Public base URL of this API (receipt links) |
-| `RECEIPT_STORAGE_DIR` | `./storage/receipts` | Disk folder for PDF receipts |
+| _(removed)_ | — | Receipts are generated on demand; no disk storage directory |
 
 ---
 
@@ -225,10 +225,32 @@ This attaches the seeded `SUPER ADMIN` role (from migration `0003`).
 
 ---
 
+## Local PostgreSQL for faster integration tests
+
+If you have `psql` locally, create a test database instead of hitting Railway over the public proxy (much faster):
+
+```powershell
+psql -U postgres -c "CREATE DATABASE kratos_test;"
+```
+
+```env
+DATABASE_URL=postgresql://postgres:YOUR_PASSWORD@localhost:5432/kratos_test
+```
+
+```powershell
+alembic upgrade head
+pytest tests/test_receipt_access_token.py tests/test_team_concurrency.py -v
+```
+
+For Railway public proxy (`*.proxy.rlwy.net`), asyncpg needs plain TCP — tests set `ssl=False` automatically in `tests/conftest.py`.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
 |---------|----------------|
+| `pytest` very slow / hangs | Railway public proxy adds ~25s per connection; use local Postgres or clear `DATABASE_URL` for unit-only runs |
 | DB connection timeout from laptop | Use `DATABASE_PUBLIC_URL`; check Railway public networking |
 | `alembic` fails SSL / auth | Wrong password / URL truncated; re-copy from Railway |
 | Google login 500 / invalid token | Wrong `GOOGLE_CLIENT_ID` or token from another OAuth client |

@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     JWT_SECRET_KEY: str = "dev-secret-change-me"
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
+    RECEIPT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 20
 
     @field_validator("JWT_SECRET_KEY")
     @classmethod
@@ -63,8 +64,7 @@ class Settings(BaseSettings):
     SMTP_FROM: str = ""
     SMTP_TLS: bool = True
 
-    # --- Receipts / public URLs ---
-    RECEIPT_STORAGE_DIR: str = "./storage/receipts"
+    # --- Public URLs (receipts are generated on demand; no file storage) ---
     APP_PUBLIC_BASE_URL: str = "http://localhost:8000"
 
     @property

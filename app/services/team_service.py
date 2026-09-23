@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
+
+from app.core.integrity_errors import raise_duplicate_registration, raise_duplicate_team_member
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -37,7 +39,7 @@ from app.models.profile import Profile
 from app.models.registration import Registration
 from app.models.team import Team, TeamInvitation, TeamMember
 from app.schemas.team import RosterAddRequest, TeamUpdateRequest
-from app.services.event_service import spots_remaining
+from app.services.event_service import invalidate_spots_cache, spots_remaining
 from app.services.roster_service import (
     can_add_role,
     count_mandatory,
@@ -233,9 +235,9 @@ async def create_team(db: AsyncSession, event_id: uuid.UUID, profile: Profile, n
 
     try:
         await db.commit()
-    except IntegrityError:
+    except IntegrityError as exc:
         await db.rollback()
-        raise AppError(ALREADY_REGISTERED, "Could not create team - already registered", status_code=409)
+        raise_duplicate_registration(exc, "Could not create team - already registered")
     except Exception:
         await db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, "Could not create team - please retry")
@@ -418,12 +420,14 @@ async def join_via_invitation(db: AsyncSession, invite_code: str, profile: Profi
 
     try:
         await db.commit()
-    except IntegrityError:
+    except IntegrityError as exc:
         await db.rollback()
-        raise AppError(ALREADY_REGISTERED, "Could not join team - already a member", status_code=409)
+        raise_duplicate_team_member(exc, "Could not join team - already a member")
     except Exception:
         await db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, "Could not join team - please retry")
+
+    invalidate_spots_cache(event_id)
 
     await db.refresh(member)
     await db.refresh(team)
@@ -546,12 +550,14 @@ async def add_roster_member(
 
     try:
         await db.commit()
-    except IntegrityError:
+    except IntegrityError as exc:
         await db.rollback()
-        raise AppError(ALREADY_REGISTERED, "Could not add member - already registered", status_code=409)
+        raise_duplicate_team_member(exc, "Could not add member - already registered")
     except Exception:
         await db.rollback()
         raise HTTPException(status.HTTP_409_CONFLICT, "Could not add roster member - please retry")
+
+    invalidate_spots_cache(team.event_id)
 
     await db.refresh(member)
     if member.profile_id:
@@ -584,6 +590,7 @@ async def leave_team(
         return await _to_member_out(member)
     member.status = TeamMemberStatus.LEFT
     await db.commit()
+    invalidate_spots_cache(team.event_id)
     await db.refresh(member)
     return await _to_member_out(member)
 
@@ -611,5 +618,6 @@ async def remove_member(
         return await _to_member_out(member)
     member.status = TeamMemberStatus.REMOVED
     await db.commit()
+    invalidate_spots_cache(team.event_id)
     await db.refresh(member)
     return await _to_member_out(member)

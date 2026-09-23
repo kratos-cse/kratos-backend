@@ -11,7 +11,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps_admin import require_super_admin
+from app.api.deps_receipt import assert_can_access_payment, assert_can_access_receipt, authorize_payment_receipt_access
 from app.core.config import settings
+from app.core.receipt_token import create_receipt_access_token
 from app.core.security import get_current_profile
 from app.db.session import get_db
 from app.models.admin import AdminUser
@@ -23,7 +25,7 @@ from app.models.registration import Registration
 from app.models.team import Team
 from app.payments.amounts import compute_amount_paise
 from app.payments.apply import apply_payment_failure, apply_payment_success
-from app.payments.razorpay_client import get_razorpay, with_retry
+from app.payments.razorpay_client import get_razorpay, with_retry_async
 from app.payments.refund import RefundError, refund_payment
 from app.payments.signatures import verify_checkout_signature, verify_webhook_signature
 
@@ -126,7 +128,7 @@ async def create_order(
         raise HTTPException(status_code=400, detail=str(err))
 
     receipt = f"kratos26_{uuid.uuid4().hex[:16]}"
-    order = with_retry(
+    order = await with_retry_async(
         lambda: get_razorpay().order.create(
             {
                 "amount": amount_paise,
@@ -254,7 +256,9 @@ async def _sync_payment_if_needed(db: AsyncSession, payment: Payment) -> Payment
         and settings.RAZORPAY_KEY_SECRET
     ):
         try:
-            order_payments = with_retry(lambda: get_razorpay().order.payments(payment.razorpay_order_id))
+            order_payments = await with_retry_async(
+                lambda: get_razorpay().order.payments(payment.razorpay_order_id)
+            )
             items = order_payments.get("items", [])
             for item in items:
                 if item.get("status") in ("captured", "authorized"):
@@ -337,16 +341,6 @@ async def sync_payment_status(
     }
 
 
-async def _assert_can_access_payment(db: AsyncSession, payment: Payment, payer: Profile) -> None:
-    if payment.payer_profile_id == payer.id:
-        return
-    admin_result = await db.execute(
-        select(AdminUser).where(AdminUser.user_id == payer.user_id, AdminUser.is_active.is_(True))
-    )
-    if admin_result.scalar_one_or_none() is None:
-        raise HTTPException(status_code=403, detail="Not your payment")
-
-
 @router.get("/payments/{payment_id}/receipt")
 async def get_payment_receipt(
     payment_id: UUID,
@@ -361,7 +355,7 @@ async def get_payment_receipt(
     if not payment:
         raise HTTPException(status_code=404, detail="Payment not found")
 
-    await _assert_can_access_payment(db, payment, payer)
+    await assert_can_access_receipt(db, payment, payer)
 
     if payment.status != PaymentStatus.PAID:
         raise HTTPException(status_code=404, detail="Receipt is only available after payment is confirmed")
@@ -378,11 +372,42 @@ async def get_payment_receipt(
     )
 
 
+@router.post("/payments/{payment_id}/receipt/access-token")
+async def issue_payment_receipt_access_token(
+    payment_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    payer: Profile = Depends(get_current_profile),
+):
+    from app.schemas.registration import ReceiptAccessTokenOut
+    from app.services.receipt_service import ensure_receipt, receipt_html_url, receipt_pdf_url
+
+    result = await db.execute(select(Payment).where(Payment.id == payment_id))
+    payment = result.scalar_one_or_none()
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+
+    await assert_can_access_receipt(db, payment, payer)
+
+    if payment.status != PaymentStatus.PAID:
+        raise HTTPException(status_code=404, detail="Receipt is only available after payment is confirmed")
+
+    await ensure_receipt(db, payment_id)
+    await db.commit()
+
+    access_token, expires_in = create_receipt_access_token(payment_id, payer.id)
+    return ReceiptAccessTokenOut(
+        access_token=access_token,
+        expires_in=expires_in,
+        html_url=receipt_html_url(payment_id, access_token),
+        pdf_url=receipt_pdf_url(payment_id, access_token),
+    )
+
+
 @router.get("/payments/{payment_id}/receipt/html")
 async def get_payment_receipt_html(
     payment_id: UUID,
     db: AsyncSession = Depends(get_db),
-    payer: Profile = Depends(get_current_profile),
+    payer: Profile = Depends(authorize_payment_receipt_access),
 ):
     from fastapi.responses import HTMLResponse
 
@@ -392,8 +417,6 @@ async def get_payment_receipt_html(
     payment = result.scalar_one_or_none()
     if not payment:
         raise HTTPException(status_code=404, detail="Payment not found")
-
-    await _assert_can_access_payment(db, payment, payer)
 
     if payment.status != PaymentStatus.PAID:
         raise HTTPException(status_code=404, detail="Receipt is only available after payment is confirmed")
@@ -409,32 +432,34 @@ async def get_payment_receipt_html(
 async def get_payment_receipt_pdf(
     payment_id: UUID,
     db: AsyncSession = Depends(get_db),
-    payer: Profile = Depends(get_current_profile),
+    payer: Profile = Depends(authorize_payment_receipt_access),
 ):
-    from fastapi.responses import FileResponse
+    from fastapi.responses import Response
 
-    from app.services.receipt_service import ensure_receipt, receipt_pdf_path
+    from app.services.receipt_service import (
+        ensure_receipt,
+        get_receipt_data_context,
+        render_pdf_receipt,
+    )
 
     result = await db.execute(select(Payment).where(Payment.id == payment_id))
     payment = result.scalar_one_or_none()
     if not payment:
         raise HTTPException(status_code=404, detail="Payment not found")
 
-    await _assert_can_access_payment(db, payment, payer)
-
     if payment.status != PaymentStatus.PAID:
         raise HTTPException(status_code=404, detail="Receipt is only available after payment is confirmed")
 
-    receipt = await ensure_receipt(db, payment_id)
+    await ensure_receipt(db, payment_id)
     await db.commit()
 
-    path = receipt_pdf_path(receipt.receipt_number)
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="Receipt PDF not found")
-    return FileResponse(
-        path,
+    ctx = await get_receipt_data_context(db, payment_id)
+    pdf_bytes = render_pdf_receipt(ctx)
+    filename = f"KRATOS-26-{ctx['receipt_number']}.pdf"
+    return Response(
+        content=pdf_bytes,
         media_type="application/pdf",
-        filename=f"{receipt.receipt_number}.pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

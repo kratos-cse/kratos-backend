@@ -1,12 +1,15 @@
 """Shared DB fixtures for integration tests (requires DATABASE_URL)."""
 import os
+
+# Ensure tests never depend on a blank JWT secret from a local .env override.
+os.environ.setdefault("JWT_SECRET_KEY", "dev-secret-change-me")
+
 import uuid
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.pool import NullPool
 
 from app.core.config import settings
 from app.models.enums import (
@@ -33,12 +36,23 @@ DATABASE_URL = (settings.DATABASE_URL or os.getenv("DATABASE_URL") or "").strip(
 requires_db = pytest.mark.skipif(not DATABASE_URL, reason="DATABASE_URL not set")
 
 
+def asyncpg_connect_args() -> dict:
+    """Railway public TCP proxy (proxy.rlwy.net) is plain TCP — no TLS on the wire."""
+    args: dict = {"timeout": 30, "command_timeout": 60}
+    if "proxy.rlwy.net" in (settings.DATABASE_URL or ""):
+        args["ssl"] = False
+    return args
+
+
 @pytest_asyncio.fixture
 async def db():
     """Yield a session; commits inside tests become savepoints, rolled back after."""
+    from sqlalchemy.pool import NullPool
+
     test_engine = create_async_engine(
         settings.async_database_url,
         poolclass=NullPool,
+        connect_args=asyncpg_connect_args(),
     )
     try:
         async with test_engine.connect() as conn:

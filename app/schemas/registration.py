@@ -74,6 +74,13 @@ class ReceiptOut(BaseModel):
     issued_at: datetime
 
 
+class ReceiptAccessTokenOut(BaseModel):
+    access_token: str
+    expires_in: int
+    html_url: str
+    pdf_url: str
+
+
 class QRCodeOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

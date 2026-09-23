@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.api.deps_admin import get_current_active_admin, require_super_admin
+from app.api.deps_admin import get_current_active_admin, invalidate_admin_cache, require_super_admin
 from app.db.session import get_db
 from app.models.admin import AdminUser, Permission, Role
 from app.models.user import User
@@ -73,6 +73,7 @@ async def create_role(
         db.add(Permission(role_id=new_role.id, permission_key=perm_key))
     await db.commit()
     await db.refresh(new_role)
+    invalidate_admin_cache()
 
     return {
         "status": "success",
@@ -115,6 +116,8 @@ async def update_role(
     except IntegrityError:
         await db.rollback()
         raise HTTPException(status_code=400, detail="Role update failed. Name might exist.")
+
+    invalidate_admin_cache()
 
     result = await db.execute(
         select(Permission).where(Permission.role_id == role_id)
@@ -174,6 +177,7 @@ async def grant_admin_access(
         await db.rollback()
         raise HTTPException(status_code=400, detail="User is already an admin.")
 
+    invalidate_admin_cache(admin_in.user_id)
     return {
         "status": "success",
         "data": {"admin_user_id": new_admin.id, "is_active": new_admin.is_active},
@@ -202,6 +206,7 @@ async def update_admin_user(
         admin.is_active = admin_in.is_active
 
     await db.commit()
+    invalidate_admin_cache(admin.user_id)
     return {
         "status": "success",
         "data": {"admin_user_id": admin.id, "is_active": admin.is_active},

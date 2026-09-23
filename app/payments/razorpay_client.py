@@ -1,3 +1,4 @@
+import asyncio
 import time
 from typing import Callable, TypeVar
 
@@ -42,3 +43,8 @@ def with_retry(fn: Callable[[], T], max_attempts: int = 5) -> T:
             time.sleep(delay_seconds)
             delay_seconds *= 2
     raise last_error  # type: ignore[misc]
+
+
+async def with_retry_async(fn: Callable[[], T], max_attempts: int = 5) -> T:
+    """Run blocking Razorpay SDK + retry backoff off the asyncio event loop."""
+    return await asyncio.to_thread(with_retry, fn, max_attempts)

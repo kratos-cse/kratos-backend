@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import get_current_profile
+from app.core.security import get_current_profile, invalidate_user_cache
 from app.db.session import get_db
 from app.models.profile import Profile
 from app.schemas.profile import ProfileOut, ProfileUpdateRequest
@@ -30,4 +30,5 @@ async def update_my_profile(
 
     await db.commit()
     await db.refresh(profile)
+    invalidate_user_cache(profile.user_id)
     return profile

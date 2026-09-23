@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.branding.documents import render_email_shell_html
 from app.core.config import settings
 from app.models.enums import (
     NotificationKind,
@@ -105,23 +106,7 @@ def render_email_html(
             f"{html.escape(footnote)}</p>"
         )
 
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{html.escape(title)}</title></head>
-<body style="margin:0;padding:0;background:#e2e8f0;font-family:Georgia,'Times New Roman',serif;">
-  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#e2e8f0;padding:32px 12px;">
-    <tr><td align="center">
-      <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
-             style="max-width:560px;background:#ffffff;border-radius:12px;overflow:hidden;
-                    border:1px solid #cbd5e1;">
-        <tr><td style="background:#0f172a;padding:28px 32px;">
-          <div style="font-size:11px;letter-spacing:0.22em;text-transform:uppercase;color:#94a3b8;">
-            ACE · CSE · Easwari</div>
-          <div style="margin-top:8px;font-size:28px;font-weight:700;letter-spacing:0.06em;color:#f8fafc;">
-            KRATOS&apos;26</div>
-        </td></tr>
-        <tr><td style="padding:28px 32px 32px;">
+    body_html = f"""
           <h1 style="margin:0 0 16px;font-size:20px;line-height:1.3;color:#0f172a;font-weight:700;">
             {html.escape(title)}</h1>
           <p style="margin:0 0 14px;font-size:15px;line-height:1.55;color:#334155;">
@@ -130,17 +115,12 @@ def render_email_html(
           {detail_rows}
           {cta}
           {note}
-        </td></tr>
-        <tr><td style="padding:16px 32px;background:#f8fafc;border-top:1px solid #e2e8f0;">
-          <p style="margin:0;font-size:11px;color:#94a3b8;line-height:1.5;">
-            Association of Computer Engineers · Department of CSE · Easwari Engineering College</p>
-        </td></tr>
-      </table>
-    </td></tr>
-  </table>
-</body>
-</html>
-"""
+    """
+    return render_email_shell_html(
+        title=title,
+        body_html=body_html,
+        footer_note="Association of Computer Engineers · Department of CSE · Easwari Engineering College",
+    )
 
 
 def _html_from_plain(body: str, subject: str) -> str:
@@ -369,11 +349,19 @@ async def notify_payment_confirmed(db: AsyncSession, payment_id: UUID) -> None:
     if venue:
         details.append(("Venue", venue))
 
+    team_paragraphs: list[str] = []
+    if team_id:
+        team_paragraphs.append(
+            "Your team payment is confirmed. Open KRATOS to share your invite link — "
+            "members can join only after you have paid."
+        )
+
     html_body = render_email_html(
         title="Payment confirmed",
         greeting=f"You're all set for {event_name}.",
         paragraphs=[
             f"We've received your payment of {amount}. Your registration is confirmed.",
+            *team_paragraphs,
             "Sign in to KRATOS to open your receipt and QR check-in pass. "
             "Bring the QR on event day — scanners verify it at the gate.",
             *( [f"Join the event WhatsApp group: {wa}"] if wa else [] ),

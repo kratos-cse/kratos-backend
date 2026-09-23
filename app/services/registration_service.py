@@ -12,6 +12,8 @@ from typing import Optional
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+
+from app.core.integrity_errors import raise_duplicate_registration
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -23,7 +25,8 @@ from app.models.registration import Registration
 from app.models.team import Team, TeamMember
 from app.schemas.registration import RegistrationCreateRequest, RegistrationType
 from app.services import qr_service
-from app.services.event_service import is_registration_open, spots_remaining
+from app.services.admin_ops_service import invalidate_dashboard_cache
+from app.services.event_service import invalidate_spots_cache, is_registration_open, spots_remaining
 from app.services import audit_service
 
 _REGISTRATION_LOAD_OPTS = (
@@ -94,9 +97,11 @@ async def create_registration(
         db.add(registration)
         try:
             await db.commit()
-        except IntegrityError:
+        except IntegrityError as exc:
             await db.rollback()
-            raise AppError(ALREADY_REGISTERED, "You are already registered for this event", status_code=409)
+            raise_duplicate_registration(exc, "You are already registered for this event")
+        invalidate_spots_cache(event_id)
+        invalidate_dashboard_cache()
         return await get_registration_or_404(db, registration.id)
 
     # TEAM
@@ -123,9 +128,11 @@ async def create_registration(
 
     try:
         await db.commit()
-    except IntegrityError:
+    except IntegrityError as exc:
         await db.rollback()
-        raise AppError(ALREADY_REGISTERED, "You are already registered for this event", status_code=409)
+        raise_duplicate_registration(exc, "You are already registered for this event")
+    invalidate_spots_cache(event_id)
+    invalidate_dashboard_cache()
     return await get_registration_or_404(db, registration.id)
 
 
@@ -266,5 +273,7 @@ async def cancel_unpaid_registration(
         actor_role="ADMIN" if is_admin else "PARTICIPANT",
         details={"event_id": str(registration.event_id), "team_id": str(registration.team_id) if registration.team_id else None},
     )
+    invalidate_spots_cache(registration.event_id)
+    invalidate_dashboard_cache()
     return await get_registration_or_404(db, registration.id)
 
