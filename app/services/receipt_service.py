@@ -100,45 +100,26 @@ def receipt_html_path(receipt_number: str) -> Path:
 async def get_receipt_data_context(db: AsyncSession, payment_id: uuid.UUID) -> dict[str, Any]:
     """Gathers complete relational data needed for rendering a rich receipt & pass."""
     # 1. Payment
-    payment = None
-    try:
-        p_result = await db.execute(select(Payment).where(Payment.id == payment_id))
-        payment = p_result.scalar_one_or_none()
-    except Exception:
-        payment = None
-
+    p_result = await db.execute(select(Payment).where(Payment.id == payment_id))
+    payment = p_result.scalar_one_or_none()
     if not payment:
-        payment = Payment(
-            id=payment_id,
-            payer_profile_id=uuid.uuid4(),
-            payment_type=PaymentType.SOLO_REGISTRATION,
-            amount_paise=15000,
-            currency="INR",
-            status=PaymentStatus.PAID,
-            razorpay_order_id=f"order_mock_{payment_id.hex[:8]}",
-            razorpay_payment_id=f"pay_mock_{payment_id.hex[:8]}",
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc),
-        )
+        raise AppError(NOT_FOUND, f"Payment {payment_id} not found", status_code=404)
 
     # 2. Payer Profile & User
-    payer_name = "Dev Participant"
-    payer_email = "participant@kratos.dev"
-    payer_phone = "+91 98765 43210"
-    payer_college = "KRATOS Institute of Technology"
+    payer_name = "Participant"
+    payer_email = ""
+    payer_phone = "N/A"
+    payer_college = "N/A"
     if payment.payer_profile_id:
-        try:
-            prof_res = await db.execute(
-                select(Profile).options(selectinload(Profile.user)).where(Profile.id == payment.payer_profile_id)
-            )
-            prof = prof_res.scalar_one_or_none()
-            if prof:
-                payer_name = prof.full_name or "Participant"
-                payer_phone = prof.phone or "+91 98765 43210"
-                payer_college = prof.college_name or "KRATOS Institute of Technology"
-                payer_email = prof.contact_email or (prof.user.email if prof.user else "")
-        except Exception:
-            pass
+        prof_res = await db.execute(
+            select(Profile).options(selectinload(Profile.user)).where(Profile.id == payment.payer_profile_id)
+        )
+        prof = prof_res.scalar_one_or_none()
+        if prof:
+            payer_name = prof.full_name or "Participant"
+            payer_phone = prof.phone or "N/A"
+            payer_college = prof.college_name or "N/A"
+            payer_email = prof.contact_email or (prof.user.email if prof.user else "")
 
     # 3. Registration
     registration = None
@@ -798,36 +779,15 @@ async def ensure_receipt(db: AsyncSession, payment_id: uuid.UUID) -> Receipt:
     Receipts are issued only for PAID payments. URLs point at authenticated API
     endpoints — files under RECEIPT_STORAGE_DIR are never publicly mounted.
     """
-    receipt = None
-    try:
-        existing = await db.execute(select(Receipt).where(Receipt.payment_id == payment_id))
-        receipt = existing.scalar_one_or_none()
-        if receipt is not None:
-            return receipt
-    except Exception:
-        pass
+    existing = await db.execute(select(Receipt).where(Receipt.payment_id == payment_id))
+    receipt = existing.scalar_one_or_none()
+    if receipt is not None:
+        return receipt
 
-    payment = None
-    try:
-        payment_result = await db.execute(select(Payment).where(Payment.id == payment_id))
-        payment = payment_result.scalar_one_or_none()
-    except Exception:
-        payment = None
-
+    payment_result = await db.execute(select(Payment).where(Payment.id == payment_id))
+    payment = payment_result.scalar_one_or_none()
     if payment is None:
-        from app.models.enums import PaymentType
-        payment = Payment(
-            id=payment_id,
-            payer_profile_id=uuid.uuid4(),
-            payment_type=PaymentType.SOLO_REGISTRATION,
-            amount_paise=15000,
-            currency="INR",
-            status=PaymentStatus.PAID,
-            razorpay_order_id=f"order_mock_{payment_id.hex[:8]}",
-            razorpay_payment_id=f"pay_mock_{payment_id.hex[:8]}",
-            created_at=datetime.now(timezone.utc),
-            updated_at=datetime.now(timezone.utc),
-        )
+        raise AppError(NOT_FOUND, "Payment not found", status_code=404)
 
     if payment.status != PaymentStatus.PAID:
         raise AppError(
@@ -854,9 +814,6 @@ async def ensure_receipt(db: AsyncSession, payment_id: uuid.UUID) -> Receipt:
         receipt_number=receipt_number,
         pdf_url=receipt_pdf_url(payment_id),
     )
-    try:
-        db.add(receipt)
-        await db.flush()
-    except Exception:
-        pass
+    db.add(receipt)
+    await db.flush()
     return receipt
