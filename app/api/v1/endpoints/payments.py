@@ -23,7 +23,7 @@ from app.models.registration import Registration
 from app.models.team import Team
 from app.payments.amounts import compute_amount_paise
 from app.payments.apply import apply_payment_failure, apply_payment_success
-from app.payments.razorpay_client import get_razorpay, with_retry
+from app.payments.razorpay_client import get_razorpay, with_retry_async
 from app.payments.refund import RefundError, refund_payment
 from app.payments.signatures import verify_checkout_signature, verify_webhook_signature
 
@@ -126,7 +126,7 @@ async def create_order(
         raise HTTPException(status_code=400, detail=str(err))
 
     receipt = f"kratos26_{uuid.uuid4().hex[:16]}"
-    order = with_retry(
+    order = await with_retry_async(
         lambda: get_razorpay().order.create(
             {
                 "amount": amount_paise,
@@ -254,7 +254,7 @@ async def _sync_payment_if_needed(db: AsyncSession, payment: Payment) -> Payment
         and settings.RAZORPAY_KEY_SECRET
     ):
         try:
-            order_payments = with_retry(lambda: get_razorpay().order.payments(payment.razorpay_order_id))
+            order_payments = await with_retry_async(lambda: get_razorpay().order.payments(payment.razorpay_order_id))
             items = order_payments.get("items", [])
             for item in items:
                 if item.get("status") in ("captured", "authorized"):

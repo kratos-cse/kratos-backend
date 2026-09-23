@@ -49,7 +49,22 @@ async def status_counts(db: AsyncSession, column, model) -> dict[str, int]:
     return out
 
 
+import time
+
+_DASHBOARD_CACHE_TTL_SEC = 10.0
+_dashboard_cache: dict[str, Any] = {"expires_at": 0.0, "payload": None}
+
+
+def invalidate_dashboard_cache() -> None:
+    _dashboard_cache["expires_at"] = 0.0
+    _dashboard_cache["payload"] = None
+
+
 async def dashboard_payload(db: AsyncSession) -> dict[str, Any]:
+    now = time.monotonic()
+    if _dashboard_cache["payload"] is not None and now < float(_dashboard_cache["expires_at"] or 0):
+        return _dashboard_cache["payload"]
+
     events_total = (await db.execute(select(func.count()).select_from(Event))).scalar_one()
     registrations = await status_counts(db, Registration.status, Registration)
     teams = await status_counts(db, Team.status, Team)
@@ -60,13 +75,17 @@ async def dashboard_payload(db: AsyncSession) -> dict[str, Any]:
         ).scalar_one()
     except Exception:
         attendance_scans = 0
-    return {
+
+    payload = {
         "events_total": events_total,
         "registrations_by_status": registrations,
         "teams_by_status": teams,
         "payments_by_status": payments,
         "attendance_scans_total": attendance_scans,
     }
+    _dashboard_cache["payload"] = payload
+    _dashboard_cache["expires_at"] = now + _DASHBOARD_CACHE_TTL_SEC
+    return payload
 
 
 async def get_event_with_rules(db: AsyncSession, event_id: uuid.UUID) -> tuple[Event, EventRegistrationRule]:

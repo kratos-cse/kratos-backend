@@ -36,12 +36,18 @@ requires_db = pytest.mark.skipif(not DATABASE_URL, reason="DATABASE_URL not set"
 @pytest_asyncio.fixture
 async def db():
     """Yield a session; commits inside tests become savepoints, rolled back after."""
+    if not DATABASE_URL:
+        pytest.skip("DATABASE_URL not set")
     test_engine = create_async_engine(
         settings.async_database_url,
         poolclass=NullPool,
     )
     try:
-        async with test_engine.connect() as conn:
+        try:
+            conn = await test_engine.connect()
+        except Exception as err:
+            pytest.skip(f"Database connection unavailable: {err}")
+        try:
             trans = await conn.begin()
             session = AsyncSession(
                 bind=conn,
@@ -53,6 +59,8 @@ async def db():
             finally:
                 await session.close()
                 await trans.rollback()
+        finally:
+            await conn.close()
     finally:
         await test_engine.dispose()
 
