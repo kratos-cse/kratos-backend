@@ -164,14 +164,15 @@ async def _send_smtp(
                 username=settings.SMTP_USER or None,
                 password=settings.SMTP_PASSWORD or None,
                 start_tls=settings.SMTP_TLS,
-                timeout=3.0,
+                timeout=10.0,
             ),
-            timeout=4.0,
+            timeout=15.0,
         )
         return True, None
     except Exception as exc:
         logger.exception("SMTP send failed to=%s subject=%s", to_email, subject)
-        return False, str(exc)
+        err = str(exc).strip() or exc.__class__.__name__
+        return False, err
 
 
 async def _deliver_notification_bg(
