@@ -10,6 +10,12 @@ class GoogleAuthRequest(BaseModel):
     id_token: str
 
 
+class DevAuthRequest(BaseModel):
+    email: EmailStr = "dev.tester@kratos.dev"
+    name: str = "Dev Tester"
+    is_admin: bool = False
+
+
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

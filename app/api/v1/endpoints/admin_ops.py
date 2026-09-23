@@ -40,7 +40,7 @@ from app.schemas.admin_ops import (
 )
 from app.services import admin_ops_service as ops
 from app.services.registration_service import _already_registered
-from app.services.event_service import invalidate_events_list_cache
+from app.services.event_service import invalidate_events_list_cache, invalidate_spots_cache
 
 router = APIRouter(prefix="/admin", tags=["Admin Operations"])
 
@@ -114,6 +114,8 @@ async def create_event(
     await db.refresh(event)
     await db.refresh(rules)
     invalidate_events_list_cache()
+    invalidate_spots_cache(event.id)
+    ops.invalidate_dashboard_cache()
     return _success(ops.event_to_dict(event, rules))
 
 
@@ -141,6 +143,8 @@ async def patch_event(
     await db.refresh(event)
     await db.refresh(rules)
     invalidate_events_list_cache()
+    invalidate_spots_cache(event.id)
+    ops.invalidate_dashboard_cache()
     return _success(ops.event_to_dict(event, rules))
 
 
@@ -170,6 +174,8 @@ async def patch_registration_rules(
     await db.commit()
     await db.refresh(rules)
     invalidate_events_list_cache()
+    invalidate_spots_cache(event.id)
+    ops.invalidate_dashboard_cache()
     return _success(ops.event_to_dict(event, rules))
 
 
@@ -183,6 +189,8 @@ async def close_event(
     event.status = EventStatus.CLOSED
     await db.commit()
     invalidate_events_list_cache()
+    invalidate_spots_cache(event.id)
+    ops.invalidate_dashboard_cache()
     return _success({"event_id": event.id, "status": event.status})
 
 
@@ -196,6 +204,8 @@ async def open_event(
     event.status = EventStatus.OPEN
     await db.commit()
     invalidate_events_list_cache()
+    invalidate_spots_cache(event.id)
+    ops.invalidate_dashboard_cache()
     return _success({"event_id": event.id, "status": event.status})
 
 
@@ -281,6 +291,8 @@ async def manual_register_participant(
     db.add(registration)
     await db.commit()
     await db.refresh(registration)
+    invalidate_spots_cache(body.event_id)
+    ops.invalidate_dashboard_cache()
     return _success(
         {
             "registration_id": registration.id,
@@ -340,6 +352,7 @@ async def patch_team(
         setattr(team, field, value)
     await db.commit()
     await db.refresh(team)
+    ops.invalidate_dashboard_cache()
     return _success(
         {
             "id": team.id,
@@ -358,7 +371,9 @@ async def transfer_leadership(
     db: AsyncSession = Depends(get_db),
     _: AdminUser = Depends(require_permission("leadership-transfer")),
 ):
-    return _success(await ops.transfer_team_leadership(db, team_id, body.new_leader_profile_id))
+    res = await ops.transfer_team_leadership(db, team_id, body.new_leader_profile_id)
+    ops.invalidate_dashboard_cache()
+    return _success(res)
 
 
 @router.post("/teams/{team_id}/cancel")
@@ -367,7 +382,10 @@ async def cancel_team(
     db: AsyncSession = Depends(get_db),
     _: AdminUser = Depends(require_super_admin),
 ):
-    return _success(await ops.cancel_team_admin(db, team_id))
+    res = await ops.cancel_team_admin(db, team_id)
+    invalidate_spots_cache()
+    ops.invalidate_dashboard_cache()
+    return _success(res)
 
 
 @router.get("/registrations")
@@ -419,6 +437,8 @@ async def patch_registration(
         registration.status = body.status
     await db.commit()
     await db.refresh(registration)
+    invalidate_spots_cache(registration.event_id)
+    ops.invalidate_dashboard_cache()
     return _success(
         {
             "id": registration.id,
@@ -435,6 +455,8 @@ async def cancel_registration(
     _: AdminUser = Depends(require_super_admin),
 ):
     registration = await ops.cancel_registration_admin(db, registration_id)
+    invalidate_spots_cache(registration.event_id)
+    ops.invalidate_dashboard_cache()
     return _success({"id": registration.id, "status": registration.status})
 
 

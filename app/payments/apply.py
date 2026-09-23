@@ -212,6 +212,13 @@ async def apply_payment_success(
 
     await _run_handoffs(db, row)
     await db.commit()
+
+    from app.services.admin_ops_service import invalidate_dashboard_cache
+    from app.services.event_service import invalidate_spots_cache
+
+    invalidate_spots_cache()
+    invalidate_dashboard_cache()
+
     await notification_service.notify_payment_confirmed(db, row.id)
     return ApplyResult(applied=True, payment=row)
 
