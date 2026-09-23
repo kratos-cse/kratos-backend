@@ -2,11 +2,12 @@
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
-from app.models.enums import EventCategory, EventStatus
+from app.models.enums import EventCategory, EventStatus, RegistrationAvailability
 from app.services.event_service import (
     get_cached_events_list,
     invalidate_events_list_cache,
     is_registration_open,
+    resolve_registration_availability,
     set_cached_events_list,
 )
 
@@ -39,6 +40,58 @@ def test_registration_open_respects_status_and_window():
         registration_closes_at=now + timedelta(hours=2),
     )
     assert is_registration_open(event, rules_future) is False
+
+
+def test_resolve_registration_availability_precedence():
+    now = datetime.now(timezone.utc)
+    event_open = SimpleNamespace(status=EventStatus.OPEN)
+    rules = SimpleNamespace(
+        registration_opens_at=now - timedelta(hours=1),
+        registration_closes_at=now + timedelta(hours=1),
+    )
+
+    assert (
+        resolve_registration_availability(event_open, rules, 5) == RegistrationAvailability.OPEN
+    )
+    assert (
+        resolve_registration_availability(event_open, rules, 0) == RegistrationAvailability.FULL
+    )
+    assert (
+        resolve_registration_availability(
+            SimpleNamespace(status=EventStatus.CLOSED), rules, 5
+        )
+        == RegistrationAvailability.EVENT_CLOSED
+    )
+    assert (
+        resolve_registration_availability(
+            event_open,
+            SimpleNamespace(
+                registration_opens_at=now + timedelta(hours=1),
+                registration_closes_at=now + timedelta(hours=2),
+            ),
+            5,
+        )
+        == RegistrationAvailability.NOT_YET_OPEN
+    )
+    assert (
+        resolve_registration_availability(
+            event_open,
+            SimpleNamespace(
+                registration_opens_at=now - timedelta(hours=2),
+                registration_closes_at=now - timedelta(hours=1),
+            ),
+            5,
+        )
+        == RegistrationAvailability.WINDOW_CLOSED
+    )
+
+
+def test_event_list_schema_includes_registration_availability():
+    from app.schemas.event import EventListItem
+
+    assert "registration_availability" in EventListItem.model_fields
+    assert "spots_remaining" in EventListItem.model_fields
+    assert "registration_mode" in EventListItem.model_fields
 
 
 def test_events_list_cache_roundtrip():

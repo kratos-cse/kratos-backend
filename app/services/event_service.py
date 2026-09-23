@@ -11,7 +11,14 @@ from typing import Optional
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.enums import CapacityType, EventStatus, RegistrationStatus, TeamMemberStatus, TeamStatus
+from app.models.enums import (
+    CapacityType,
+    EventStatus,
+    RegistrationAvailability,
+    RegistrationStatus,
+    TeamMemberStatus,
+    TeamStatus,
+)
 from app.models.event import Event, EventRegistrationRule
 from app.models.registration import Registration
 from app.models.team import Team, TeamMember
@@ -38,18 +45,51 @@ def set_cached_events_list(payload) -> None:
     _events_list_cache["expires_at"] = time.monotonic() + EVENTS_LIST_CACHE_TTL_SEC
 
 
-def is_registration_open(event: Event, rules: Optional[EventRegistrationRule]) -> bool:
-    """Effective openness = admin status OPEN AND within the registration window."""
+def resolve_registration_availability(
+    event: Event,
+    rules: Optional[EventRegistrationRule],
+    spots_remaining_count: Optional[int],
+) -> RegistrationAvailability:
+    """
+    Single source of truth for whether users can register right now.
+    Precedence: event lifecycle → registration window → capacity.
+    """
+    if event.status in (EventStatus.CLOSED, EventStatus.CANCELLED, EventStatus.COMPLETED):
+        return RegistrationAvailability.EVENT_CLOSED
     if event.status != EventStatus.OPEN:
-        return False
+        return RegistrationAvailability.EVENT_CLOSED
 
     now = datetime.now(timezone.utc)
     if rules:
         if rules.registration_opens_at and now < rules.registration_opens_at:
-            return False
+            return RegistrationAvailability.NOT_YET_OPEN
         if rules.registration_closes_at and now > rules.registration_closes_at:
-            return False
-    return True
+            return RegistrationAvailability.WINDOW_CLOSED
+
+    if spots_remaining_count is not None and spots_remaining_count <= 0:
+        return RegistrationAvailability.FULL
+
+    return RegistrationAvailability.OPEN
+
+
+def is_registration_open(
+    event: Event,
+    rules: Optional[EventRegistrationRule],
+    spots_remaining_count: Optional[int] = None,
+) -> bool:
+    """True only when resolve_registration_availability == OPEN."""
+    return (
+        resolve_registration_availability(event, rules, spots_remaining_count)
+        == RegistrationAvailability.OPEN
+    )
+
+
+async def registration_availability_for_event(
+    db: AsyncSession, event: Event, rules: Optional[EventRegistrationRule]
+) -> tuple[RegistrationAvailability, Optional[int]]:
+    remaining = await spots_remaining(db, event, rules)
+    availability = resolve_registration_availability(event, rules, remaining)
+    return availability, remaining
 
 
 async def _count_used_capacity(db: AsyncSession, event: Event, rules: Optional[EventRegistrationRule]) -> int:

@@ -77,15 +77,14 @@ async def create_registration(
 ) -> Registration:
     event, rules = await _get_event_with_rules(db, event_id, for_update=True)
 
-    if not is_registration_open(event, rules):
+    remaining = await spots_remaining(db, event, rules)
+    if not is_registration_open(event, rules, remaining):
+        if remaining is not None and remaining <= 0:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This event has reached capacity")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Registration is not open for this event")
 
     if await _already_registered(db, event_id, profile.id):
         raise AppError(ALREADY_REGISTERED, "You are already registered for this event", status_code=409)
-
-    remaining = await spots_remaining(db, event, rules)
-    if remaining is not None and remaining <= 0:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This event has reached capacity")
 
     if payload.registration_type == RegistrationType.SOLO:
         if rules and not rules.allow_individual:

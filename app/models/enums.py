@@ -8,6 +8,16 @@ class EventStatus(str, enum.Enum):
     CANCELLED = "CANCELLED"
 
 
+class RegistrationAvailability(str, enum.Enum):
+    """Authoritative registration UX state — computed server-side only."""
+
+    OPEN = "OPEN"
+    EVENT_CLOSED = "EVENT_CLOSED"
+    NOT_YET_OPEN = "NOT_YET_OPEN"
+    WINDOW_CLOSED = "WINDOW_CLOSED"
+    FULL = "FULL"
+
+
 class EventCategory(str, enum.Enum):
     """Locked KRATOS'26 catalogue categories. PLAYGROUND includes sports."""
 

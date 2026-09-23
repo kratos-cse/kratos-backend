@@ -40,7 +40,7 @@ from app.schemas.admin_ops import (
 )
 from app.services import admin_ops_service as ops
 from app.services.registration_service import _already_registered
-from app.services.event_service import invalidate_events_list_cache
+from app.services.event_service import invalidate_events_list_cache, invalidate_spots_cache
 
 router = APIRouter(prefix="/admin", tags=["Admin Operations"])
 
@@ -114,7 +114,8 @@ async def create_event(
     await db.refresh(event)
     await db.refresh(rules)
     invalidate_events_list_cache()
-    return _success(ops.event_to_dict(event, rules))
+    invalidate_spots_cache(event.id)
+    return _success(await ops.event_to_dict_with_state(db, event, rules))
 
 
 @router.get("/events/{event_id}")
@@ -124,7 +125,7 @@ async def get_admin_event(
     _: AdminUser = Depends(get_current_active_admin),
 ):
     event, rules = await ops.get_event_with_rules(db, event_id)
-    return _success(ops.event_to_dict(event, rules))
+    return _success(await ops.event_to_dict_with_state(db, event, rules))
 
 
 @router.patch("/events/{event_id}")
@@ -140,8 +141,10 @@ async def patch_event(
     await db.commit()
     await db.refresh(event)
     await db.refresh(rules)
+    if body.capacity is not None:
+        invalidate_spots_cache(event_id)
     invalidate_events_list_cache()
-    return _success(ops.event_to_dict(event, rules))
+    return _success(await ops.event_to_dict_with_state(db, event, rules))
 
 
 @router.patch("/events/{event_id}/registration-rules")
@@ -170,7 +173,8 @@ async def patch_registration_rules(
     await db.commit()
     await db.refresh(rules)
     invalidate_events_list_cache()
-    return _success(ops.event_to_dict(event, rules))
+    invalidate_spots_cache(event_id)
+    return _success(await ops.event_to_dict_with_state(db, event, rules))
 
 
 @router.post("/events/{event_id}/close")
@@ -182,8 +186,10 @@ async def close_event(
     event, rules = await ops.get_event_with_rules(db, event_id)
     event.status = EventStatus.CLOSED
     await db.commit()
+    await db.refresh(event)
     invalidate_events_list_cache()
-    return _success({"event_id": event.id, "status": event.status})
+    invalidate_spots_cache(event.id)
+    return _success(await ops.event_to_dict_with_state(db, event, rules))
 
 
 @router.post("/events/{event_id}/open")
@@ -195,8 +201,10 @@ async def open_event(
     event, rules = await ops.get_event_with_rules(db, event_id)
     event.status = EventStatus.OPEN
     await db.commit()
+    await db.refresh(event)
     invalidate_events_list_cache()
-    return _success({"event_id": event.id, "status": event.status})
+    invalidate_spots_cache(event.id)
+    return _success(await ops.event_to_dict_with_state(db, event, rules))
 
 
 @router.get("/participants")

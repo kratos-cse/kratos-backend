@@ -11,6 +11,7 @@ from app.models.enums import (
     EventSlot,
     EventStatus,
     MemberRegistrationMode,
+    RegistrationAvailability,
     RegistrationMode,
 )
 
@@ -32,7 +33,12 @@ class EventListItem(BaseModel):
     slot: EventSlot | None
     status: EventStatus
     registration_open: bool
+    registration_availability: RegistrationAvailability
+    spots_remaining: int | None = None
+    registration_opens_at: datetime | None = None
+    registration_closes_at: datetime | None = None
     allow_individual: bool
+    registration_mode: RegistrationMode | None = None
     team_min_size: int
     team_max_size: int
     required_member_count: int = 1
@@ -61,6 +67,7 @@ class EventDetail(BaseModel):
     slot: EventSlot | None
     status: EventStatus
     registration_open: bool
+    registration_availability: RegistrationAvailability
     spots_remaining: int | None
 
     team_min_size: int

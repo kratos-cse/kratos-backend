@@ -19,19 +19,15 @@ from app.models.profile import Profile
 from app.models.registration import Registration
 from app.models.team import Team, TeamMember
 from app.schemas.event import EventDetail, EventListItem, EventWhatsAppOut
-from app.services.event_service import (
-    get_cached_events_list,
-    is_registration_open,
-    set_cached_events_list,
-    spots_remaining,
-)
+from app.services.event_projection import build_event_state
+from app.services.event_service import get_cached_events_list, set_cached_events_list
 
 router = APIRouter(prefix="/events", tags=["Events"])
 
 
 @router.get("", response_model=list[EventListItem])
 async def list_events(db: AsyncSession = Depends(get_db)):
-    """Public event catalogue — lightweight projection, no per-event capacity."""
+    """Public event catalogue — includes authoritative registration_availability."""
     cached = get_cached_events_list()
     if cached is not None:
         return cached
@@ -45,6 +41,7 @@ async def list_events(db: AsyncSession = Depends(get_db)):
 
     items: list[EventListItem] = []
     for event, rules in rows:
+        state = await build_event_state(db, event, rules)
         items.append(
             EventListItem(
                 id=event.id,
@@ -58,14 +55,7 @@ async def list_events(db: AsyncSession = Depends(get_db)):
                 ends_at=event.ends_at,
                 slot=event.slot,
                 status=event.status,
-                registration_open=is_registration_open(event, rules),
-                allow_individual=rules.allow_individual if rules else True,
-                team_min_size=rules.team_min_size if rules else 1,
-                team_max_size=rules.team_max_size if rules else 1,
-                required_member_count=getattr(rules, "required_member_count", None) or (rules.team_min_size if rules else 1),
-                substitute_count=getattr(rules, "substitute_count", None)
-                if rules and getattr(rules, "substitute_count", None) is not None
-                else max(0, (rules.team_max_size if rules else 1) - (rules.team_min_size if rules else 1)),
+                **state,
             )
         )
 
@@ -82,7 +72,7 @@ async def get_event(event_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         raise AppError(EVENT_NOT_FOUND, "Event not found", status_code=status.HTTP_404_NOT_FOUND)
 
     rules = event.rules
-    remaining = await spots_remaining(db, event, rules)
+    state = await build_event_state(db, event, rules)
 
     return EventDetail(
         id=event.id,
@@ -101,25 +91,12 @@ async def get_event(event_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         ends_at=event.ends_at,
         slot=event.slot,
         status=event.status,
-        registration_open=is_registration_open(event, rules),
-        spots_remaining=remaining,
-        team_min_size=rules.team_min_size if rules else 1,
-        team_max_size=rules.team_max_size if rules else 1,
-        required_member_count=getattr(rules, "required_member_count", None) or (rules.team_min_size if rules else 1),
-        substitute_count=(
-            getattr(rules, "substitute_count", None)
-            if rules and getattr(rules, "substitute_count", None) is not None
-            else max(0, (rules.team_max_size if rules else 1) - (rules.team_min_size if rules else 1))
-        ),
-        allow_individual=rules.allow_individual if rules else True,
-        registration_mode=rules.registration_mode if rules else None,
         capacity_type=rules.capacity_type if rules else None,
         member_registration_mode=rules.member_registration_mode if rules else None,
         allow_team_invite_flow=rules.allow_team_invite_flow if rules else False,
         requires_qr_checkin=rules.requires_qr_checkin if rules else True,
         custom_fields=rules.custom_fields if rules else None,
-        registration_opens_at=rules.registration_opens_at if rules else None,
-        registration_closes_at=rules.registration_closes_at if rules else None,
+        **state,
     )
 
 

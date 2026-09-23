@@ -138,6 +138,17 @@ def event_to_dict(event: Event, rules: EventRegistrationRule) -> dict[str, Any]:
     }
 
 
+async def event_to_dict_with_state(
+    db: AsyncSession, event: Event, rules: EventRegistrationRule
+) -> dict[str, Any]:
+    """Admin + public clients: same derived registration fields as GET /events."""
+    from app.services.event_projection import build_event_state
+
+    payload = event_to_dict(event, rules)
+    payload.update(await build_event_state(db, event, rules))
+    return payload
+
+
 async def transfer_team_leadership(
     db: AsyncSession, team_id: uuid.UUID, new_leader_profile_id: uuid.UUID
 ) -> dict[str, Any]:
