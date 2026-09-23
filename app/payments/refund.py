@@ -11,7 +11,7 @@ from app.models.payment import Payment
 from app.models.registration import Registration
 from app.models.team import Team
 from app.services import notification_service
-from app.payments.razorpay_client import get_razorpay, with_retry
+from app.payments.razorpay_client import get_razorpay, with_retry_async
 
 
 class RefundError(Exception):
@@ -37,7 +37,7 @@ async def refund_payment(db: AsyncSession, payment_id: UUID, reason: str) -> Ref
     if not payment.razorpay_payment_id:
         raise RefundError(f"Payment {payment_id} has no razorpay_payment_id to refund", status=409)
 
-    refund = with_retry(
+    refund = await with_retry_async(
         lambda: get_razorpay().payment.refund(
             payment.razorpay_payment_id, {"amount": payment.amount_paise}
         )

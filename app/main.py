@@ -35,7 +35,14 @@ app.add_middleware(
 @app.middleware("http")
 async def request_timing(request: Request, call_next):
     started = time.perf_counter()
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        logger.exception("Unhandled error processing %s: %s", request.url.path, exc)
+        return JSONResponse(
+            status_code=500,
+            content={"error": {"code": "INTERNAL_SERVER_ERROR", "message": "Internal server error"}},
+        )
     elapsed_ms = (time.perf_counter() - started) * 1000
     path = request.url.path
     if path.startswith("/api/v1"):
@@ -83,6 +90,15 @@ async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONR
     return JSONResponse(
         status_code=exc.status_code,
         content={"error": {"code": code, "message": message}},
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(_request: Request, exc: Exception) -> JSONResponse:
+    logger.exception("Unhandled server exception: %s", exc)
+    return JSONResponse(
+        status_code=500,
+        content={"error": {"code": "INTERNAL_SERVER_ERROR", "message": "An unexpected error occurred"}},
     )
 
 

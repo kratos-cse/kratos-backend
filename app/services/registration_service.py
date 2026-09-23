@@ -23,7 +23,8 @@ from app.models.registration import Registration
 from app.models.team import Team, TeamMember
 from app.schemas.registration import RegistrationCreateRequest, RegistrationType
 from app.services import qr_service
-from app.services.event_service import is_registration_open, spots_remaining
+from app.services.event_service import invalidate_spots_cache, is_registration_open, spots_remaining
+from app.services.admin_ops_service import invalidate_dashboard_cache
 from app.services import audit_service
 
 _REGISTRATION_LOAD_OPTS = (
@@ -144,6 +145,8 @@ async def create_registration(
             registration = Registration(event_id=event_id, profile_id=profile.id, status=RegistrationStatus.PENDING)
             db.add(registration)
             await db.commit()
+            invalidate_spots_cache(event_id)
+            invalidate_dashboard_cache()
             return await get_registration_or_404(db, registration.id)
 
         # TEAM
@@ -169,10 +172,6 @@ async def create_registration(
         db.add(registration)
         await db.commit()
 
-        # Invalidate caches
-        from app.services.event_service import invalidate_spots_cache
-        from app.services.admin_ops_service import invalidate_dashboard_cache
-
         invalidate_spots_cache(event_id)
         invalidate_dashboard_cache()
         return await get_registration_or_404(db, registration.id)
@@ -182,6 +181,7 @@ async def create_registration(
     except Exception:
         # Dev fallback when live DB is unavailable
         from app.services.sample_events import create_dev_registration
+
         return create_dev_registration(event_id, profile.id, payload)
 
 
@@ -347,9 +347,6 @@ async def cancel_unpaid_registration(
         actor_role="ADMIN" if is_admin else "PARTICIPANT",
         details={"event_id": str(registration.event_id), "team_id": str(registration.team_id) if registration.team_id else None},
     )
-
-    from app.services.event_service import invalidate_spots_cache
-    from app.services.admin_ops_service import invalidate_dashboard_cache
 
     invalidate_spots_cache(registration.event_id)
     invalidate_dashboard_cache()

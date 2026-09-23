@@ -9,6 +9,7 @@ but resets on restart and isn't shared across workers — swap it for a
 Redis set (or a short-lived access token + refresh token pair) before
 running this in production with more than one worker.
 """
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Tuple
@@ -70,6 +71,10 @@ def revoke_token(jti: str) -> None:
 
 import time
 
+# get_current_user/get_current_profile run as a Depends() on nearly every
+# authenticated route, so an uncached lookup means 2 extra DB round-trips
+# per request regardless of what the endpoint itself does. A short TTL
+# cache removes that tax.
 _USER_CACHE_TTL_SEC = 20.0
 _user_cache: dict[uuid.UUID, tuple[float, User]] = {}
 _profile_cache: dict[uuid.UUID, tuple[float, Profile]] = {}
