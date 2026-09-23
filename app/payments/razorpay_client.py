@@ -1,3 +1,4 @@
+import asyncio
 import time
 from typing import Callable, TypeVar
 
@@ -42,3 +43,15 @@ def with_retry(fn: Callable[[], T], max_attempts: int = 5) -> T:
             time.sleep(delay_seconds)
             delay_seconds *= 2
     raise last_error  # type: ignore[misc]
+
+
+async def with_retry_async(fn: Callable[[], T], max_attempts: int = 5) -> T:
+    """Same retry/backoff as with_retry, off the event loop.
+
+    The razorpay SDK and time.sleep() are both blocking; calling with_retry
+    directly from an async endpoint freezes the whole process for every
+    other concurrent request on a single-worker deployment (this app's
+    Procfile runs one uvicorn worker). Running it in a thread keeps that
+    blocking work from stalling the event loop.
+    """
+    return await asyncio.to_thread(with_retry, fn, max_attempts)
