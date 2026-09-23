@@ -15,7 +15,8 @@ from app.core.config import settings
 from app.models.enums import (
     CapacityType,
     EventCategory,
-    EventStatus,
+    EventRegistrationStatus,
+    EventVisibility,
     MemberRegistrationMode,
     PaymentStatus,
     PaymentType,
@@ -96,7 +97,8 @@ async def _make_event(db: AsyncSession, *, name: str, team: bool = False) -> Eve
         category=EventCategory.TECHNICAL,
         fee=250,
         venue="Test Hall",
-        status=EventStatus.OPEN,
+        visibility=EventVisibility.PUBLISHED,
+        registration_status=EventRegistrationStatus.OPEN,
     )
     db.add(event)
     await db.flush()

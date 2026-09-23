@@ -11,7 +11,14 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from app.db.session import AsyncSessionLocal
-from app.models.enums import CapacityType, EventSlot, EventStatus, MemberRegistrationMode, RegistrationMode
+from app.models.enums import (
+    CapacityType,
+    EventRegistrationStatus,
+    EventSlot,
+    EventVisibility,
+    MemberRegistrationMode,
+    RegistrationMode,
+)
 from app.models.event import Event, EventRegistrationRule
 
 IST = ZoneInfo("Asia/Kolkata")
@@ -26,7 +33,8 @@ async def seed() -> None:
             category="Technical",
             fee=100,
             venue="Lab 2",
-            status=EventStatus.OPEN,
+            visibility=EventVisibility.PUBLISHED,
+            registration_status=EventRegistrationStatus.OPEN,
             starts_at=datetime(2026, 10, 15, 10, 0, tzinfo=IST),  # 10:00 AM IST
             ends_at=datetime(2026, 10, 15, 13, 0, tzinfo=IST),  # 1:00 PM IST
             slot=EventSlot.MORNING,
@@ -54,7 +62,8 @@ async def seed() -> None:
             category="Hackathon",
             fee=500,
             venue="Main Auditorium",
-            status=EventStatus.OPEN,
+            visibility=EventVisibility.PUBLISHED,
+            registration_status=EventRegistrationStatus.OPEN,
             starts_at=datetime(2026, 10, 18, 14, 0, tzinfo=IST),  # 2:00 PM IST, Day 1
             ends_at=datetime(2026, 10, 19, 14, 0, tzinfo=IST),  # 2:00 PM IST, Day 2 (24 hrs later)
             slot=EventSlot.MULTI_DAY,

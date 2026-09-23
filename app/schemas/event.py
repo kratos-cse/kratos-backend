@@ -8,8 +8,9 @@ from pydantic import BaseModel, ConfigDict
 from app.models.enums import (
     CapacityType,
     EventCategory,
+    EventRegistrationStatus,
     EventSlot,
-    EventStatus,
+    EventVisibility,
     MemberRegistrationMode,
     RegistrationAvailability,
     RegistrationMode,
@@ -31,12 +32,11 @@ class EventListItem(BaseModel):
     starts_at: datetime | None
     ends_at: datetime | None
     slot: EventSlot | None
-    status: EventStatus
+    visibility: EventVisibility
+    registration_status: EventRegistrationStatus
     registration_open: bool
     registration_availability: RegistrationAvailability
     spots_remaining: int | None = None
-    registration_opens_at: datetime | None = None
-    registration_closes_at: datetime | None = None
     allow_individual: bool
     registration_mode: RegistrationMode | None = None
     team_min_size: int
@@ -65,7 +65,8 @@ class EventDetail(BaseModel):
     starts_at: datetime | None
     ends_at: datetime | None
     slot: EventSlot | None
-    status: EventStatus
+    visibility: EventVisibility
+    registration_status: EventRegistrationStatus
     registration_open: bool
     registration_availability: RegistrationAvailability
     spots_remaining: int | None
@@ -81,8 +82,6 @@ class EventDetail(BaseModel):
     allow_team_invite_flow: bool
     requires_qr_checkin: bool
     custom_fields: dict[str, Any] | None
-    registration_opens_at: datetime | None
-    registration_closes_at: datetime | None
 
 
 class EventWhatsAppOut(BaseModel):

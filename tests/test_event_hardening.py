@@ -1,8 +1,12 @@
-"""Unit tests for event catalogue hardening (no live DB required)."""
-from datetime import datetime, timedelta, timezone
+"""Unit tests for event visibility + registration model (no live DB required)."""
 from types import SimpleNamespace
 
-from app.models.enums import EventCategory, EventStatus, RegistrationAvailability
+from app.models.enums import (
+    EventCategory,
+    EventRegistrationStatus,
+    EventVisibility,
+    RegistrationAvailability,
+)
 from app.services.event_service import (
     get_cached_events_list,
     invalidate_events_list_cache,
@@ -10,6 +14,21 @@ from app.services.event_service import (
     resolve_registration_availability,
     set_cached_events_list,
 )
+from app.services.event_state import (
+    close_registration,
+    open_registration,
+    publish_event,
+    unpublish_event,
+)
+
+
+def _event(**kwargs):
+    defaults = {
+        "visibility": EventVisibility.PUBLISHED,
+        "registration_status": EventRegistrationStatus.OPEN,
+    }
+    defaults.update(kwargs)
+    return SimpleNamespace(**defaults)
 
 
 def test_event_category_values_locked():
@@ -23,72 +42,81 @@ def test_event_category_values_locked():
     assert "SPORTS" not in {c.value for c in EventCategory}
 
 
-def test_registration_open_respects_status_and_window():
-    now = datetime.now(timezone.utc)
-    event = SimpleNamespace(status=EventStatus.OPEN)
-    rules = SimpleNamespace(
-        registration_opens_at=now - timedelta(hours=1),
-        registration_closes_at=now + timedelta(hours=1),
-    )
-    assert is_registration_open(event, rules) is True
+def test_registration_open_requires_published_and_open():
+    event = _event()
+    assert is_registration_open(event, None) is True
 
-    event_closed = SimpleNamespace(status=EventStatus.CLOSED)
-    assert is_registration_open(event_closed, rules) is False
-
-    rules_future = SimpleNamespace(
-        registration_opens_at=now + timedelta(hours=1),
-        registration_closes_at=now + timedelta(hours=2),
+    assert is_registration_open(_event(visibility=EventVisibility.UNPUBLISHED), None) is False
+    assert (
+        is_registration_open(
+            _event(registration_status=EventRegistrationStatus.CLOSED),
+            None,
+        )
+        is False
     )
-    assert is_registration_open(event, rules_future) is False
 
 
 def test_resolve_registration_availability_precedence():
-    now = datetime.now(timezone.utc)
-    event_open = SimpleNamespace(status=EventStatus.OPEN)
-    rules = SimpleNamespace(
-        registration_opens_at=now - timedelta(hours=1),
-        registration_closes_at=now + timedelta(hours=1),
-    )
-
-    assert (
-        resolve_registration_availability(event_open, rules, 5) == RegistrationAvailability.OPEN
-    )
-    assert (
-        resolve_registration_availability(event_open, rules, 0) == RegistrationAvailability.FULL
-    )
+    event = _event()
+    assert resolve_registration_availability(event, None, 5) == RegistrationAvailability.OPEN
+    assert resolve_registration_availability(event, None, 0) == RegistrationAvailability.FULL
     assert (
         resolve_registration_availability(
-            SimpleNamespace(status=EventStatus.CLOSED), rules, 5
-        )
-        == RegistrationAvailability.EVENT_CLOSED
-    )
-    assert (
-        resolve_registration_availability(
-            event_open,
-            SimpleNamespace(
-                registration_opens_at=now + timedelta(hours=1),
-                registration_closes_at=now + timedelta(hours=2),
-            ),
+            _event(registration_status=EventRegistrationStatus.CLOSED),
+            None,
             5,
         )
-        == RegistrationAvailability.NOT_YET_OPEN
+        == RegistrationAvailability.CLOSED
     )
     assert (
         resolve_registration_availability(
-            event_open,
-            SimpleNamespace(
-                registration_opens_at=now - timedelta(hours=2),
-                registration_closes_at=now - timedelta(hours=1),
-            ),
+            _event(visibility=EventVisibility.UNPUBLISHED),
+            None,
             5,
         )
-        == RegistrationAvailability.WINDOW_CLOSED
+        == RegistrationAvailability.CLOSED
     )
 
 
-def test_event_list_schema_includes_registration_availability():
+def test_open_registration_requires_published():
+    import pytest
+    from fastapi import HTTPException
+
+    event = _event(
+        visibility=EventVisibility.UNPUBLISHED,
+        registration_status=EventRegistrationStatus.CLOSED,
+    )
+    with pytest.raises(HTTPException) as exc:
+        open_registration(event)
+    assert exc.value.status_code == 400
+
+
+def test_event_state_transitions():
+    event = _event(
+        visibility=EventVisibility.UNPUBLISHED,
+        registration_status=EventRegistrationStatus.CLOSED,
+    )
+    publish_event(event)
+    assert event.visibility == EventVisibility.PUBLISHED
+    assert event.registration_status == EventRegistrationStatus.CLOSED
+
+    open_registration(event)
+    assert event.registration_status == EventRegistrationStatus.OPEN
+
+    close_registration(event)
+    assert event.registration_status == EventRegistrationStatus.CLOSED
+
+    open_registration(event)
+    unpublish_event(event)
+    assert event.visibility == EventVisibility.UNPUBLISHED
+    assert event.registration_status == EventRegistrationStatus.CLOSED
+
+
+def test_event_list_schema_includes_visibility_and_registration_status():
     from app.schemas.event import EventListItem
 
+    assert "visibility" in EventListItem.model_fields
+    assert "registration_status" in EventListItem.model_fields
     assert "registration_availability" in EventListItem.model_fields
     assert "spots_remaining" in EventListItem.model_fields
     assert "registration_mode" in EventListItem.model_fields

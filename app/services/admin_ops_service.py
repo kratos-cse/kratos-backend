@@ -119,7 +119,8 @@ def event_to_dict(event: Event, rules: EventRegistrationRule) -> dict[str, Any]:
         "starts_at": event.starts_at,
         "ends_at": event.ends_at,
         "slot": event.slot,
-        "status": event.status,
+        "visibility": event.visibility,
+        "registration_status": event.registration_status,
         "rules": {
             "registration_mode": rules.registration_mode,
             "team_min_size": rules.team_min_size,
@@ -132,8 +133,6 @@ def event_to_dict(event: Event, rules: EventRegistrationRule) -> dict[str, Any]:
             "capacity_type": rules.capacity_type,
             "member_registration_mode": rules.member_registration_mode,
             "custom_fields": rules.custom_fields,
-            "registration_opens_at": rules.registration_opens_at,
-            "registration_closes_at": rules.registration_closes_at,
         },
     }
 

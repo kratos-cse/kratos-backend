@@ -5,7 +5,6 @@ neither of which is a stored column, both are derived from EVENTS +
 EVENT_REGISTRATION_RULES + how many registrations/teams already exist.
 """
 import time
-from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import func, select
@@ -13,7 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.enums import (
     CapacityType,
-    EventStatus,
+    EventRegistrationStatus,
+    EventVisibility,
     RegistrationAvailability,
     RegistrationStatus,
     TeamMemberStatus,
@@ -52,19 +52,12 @@ def resolve_registration_availability(
 ) -> RegistrationAvailability:
     """
     Single source of truth for whether users can register right now.
-    Precedence: event lifecycle → registration window → capacity.
+    Precedence: visibility → admin registration_status → capacity.
     """
-    if event.status in (EventStatus.CLOSED, EventStatus.CANCELLED, EventStatus.COMPLETED):
-        return RegistrationAvailability.EVENT_CLOSED
-    if event.status != EventStatus.OPEN:
-        return RegistrationAvailability.EVENT_CLOSED
-
-    now = datetime.now(timezone.utc)
-    if rules:
-        if rules.registration_opens_at and now < rules.registration_opens_at:
-            return RegistrationAvailability.NOT_YET_OPEN
-        if rules.registration_closes_at and now > rules.registration_closes_at:
-            return RegistrationAvailability.WINDOW_CLOSED
+    if event.visibility != EventVisibility.PUBLISHED:
+        return RegistrationAvailability.CLOSED
+    if event.registration_status != EventRegistrationStatus.OPEN:
+        return RegistrationAvailability.CLOSED
 
     if spots_remaining_count is not None and spots_remaining_count <= 0:
         return RegistrationAvailability.FULL

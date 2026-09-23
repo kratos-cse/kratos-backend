@@ -1,20 +1,23 @@
 import enum
 
 
-class EventStatus(str, enum.Enum):
+class EventVisibility(str, enum.Enum):
+    PUBLISHED = "PUBLISHED"
+    UNPUBLISHED = "UNPUBLISHED"
+
+
+class EventRegistrationStatus(str, enum.Enum):
+    """Admin-controlled registration switch on an event (not participant registration records)."""
+
     OPEN = "OPEN"
     CLOSED = "CLOSED"
-    COMPLETED = "COMPLETED"
-    CANCELLED = "CANCELLED"
 
 
 class RegistrationAvailability(str, enum.Enum):
-    """Authoritative registration UX state — computed server-side only."""
+    """Effective registration UX state — computed server-side only."""
 
     OPEN = "OPEN"
-    EVENT_CLOSED = "EVENT_CLOSED"
-    NOT_YET_OPEN = "NOT_YET_OPEN"
-    WINDOW_CLOSED = "WINDOW_CLOSED"
+    CLOSED = "CLOSED"
     FULL = "FULL"
 
 

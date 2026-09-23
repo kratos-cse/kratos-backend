@@ -11,8 +11,9 @@ from app.db.base import Base
 from app.models.enums import (
     CapacityType,
     EventCategory,
+    EventRegistrationStatus,
     EventSlot,
-    EventStatus,
+    EventVisibility,
     MemberRegistrationMode,
     RegistrationMode,
 )
@@ -41,8 +42,15 @@ class Event(Base):
     google_sheet_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     starts_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     ends_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    status: Mapped[EventStatus] = mapped_column(
-        Enum(EventStatus, name="event_status"), default=EventStatus.OPEN, nullable=False
+    visibility: Mapped[EventVisibility] = mapped_column(
+        Enum(EventVisibility, name="event_visibility"),
+        default=EventVisibility.UNPUBLISHED,
+        nullable=False,
+    )
+    registration_status: Mapped[EventRegistrationStatus] = mapped_column(
+        Enum(EventRegistrationStatus, name="event_registration_status"),
+        default=EventRegistrationStatus.CLOSED,
+        nullable=False,
     )
     slot: Mapped[Optional[EventSlot]] = mapped_column(Enum(EventSlot, name="event_slot"), nullable=True)
 

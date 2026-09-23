@@ -13,7 +13,7 @@ from app.core.errors import (
 )
 from app.core.security import get_current_profile
 from app.db.session import get_db
-from app.models.enums import RegistrationStatus, TeamMemberStatus, TeamStatus
+from app.models.enums import EventVisibility, RegistrationStatus, TeamMemberStatus, TeamStatus
 from app.models.event import Event, EventRegistrationRule
 from app.models.profile import Profile
 from app.models.registration import Registration
@@ -35,6 +35,7 @@ async def list_events(db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(Event, EventRegistrationRule)
         .outerjoin(EventRegistrationRule, EventRegistrationRule.event_id == Event.id)
+        .where(Event.visibility == EventVisibility.PUBLISHED)
         .order_by(Event.starts_at.nulls_last())
     )
     rows = result.all()
@@ -54,7 +55,8 @@ async def list_events(db: AsyncSession = Depends(get_db)):
                 starts_at=event.starts_at,
                 ends_at=event.ends_at,
                 slot=event.slot,
-                status=event.status,
+                visibility=event.visibility,
+                registration_status=event.registration_status,
                 **state,
             )
         )
@@ -69,6 +71,8 @@ async def get_event(event_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Event).options(selectinload(Event.rules)).where(Event.id == event_id))
     event = result.scalar_one_or_none()
     if event is None:
+        raise AppError(EVENT_NOT_FOUND, "Event not found", status_code=status.HTTP_404_NOT_FOUND)
+    if event.visibility != EventVisibility.PUBLISHED:
         raise AppError(EVENT_NOT_FOUND, "Event not found", status_code=status.HTTP_404_NOT_FOUND)
 
     rules = event.rules
@@ -90,7 +94,8 @@ async def get_event(event_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         starts_at=event.starts_at,
         ends_at=event.ends_at,
         slot=event.slot,
-        status=event.status,
+        visibility=event.visibility,
+        registration_status=event.registration_status,
         capacity_type=rules.capacity_type if rules else None,
         member_registration_mode=rules.member_registration_mode if rules else None,
         allow_team_invite_flow=rules.allow_team_invite_flow if rules else False,

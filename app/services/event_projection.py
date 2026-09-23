@@ -34,8 +34,6 @@ async def build_event_state(
         "registration_availability": availability,
         "registration_open": is_registration_open(event, rules, remaining),
         "spots_remaining": remaining,
-        "registration_opens_at": rules.registration_opens_at if rules else None,
-        "registration_closes_at": rules.registration_closes_at if rules else None,
         "allow_individual": rules.allow_individual if rules else True,
         "registration_mode": rules.registration_mode if rules else None,
         "team_min_size": _rule_int(rules, "team_min_size", 1),

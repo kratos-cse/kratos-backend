@@ -18,7 +18,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.errors import ALREADY_REGISTERED, AppError
-from app.models.enums import PaymentStatus, RegistrationStatus, TeamMemberRole, TeamMemberStatus, TeamStatus
+from app.models.enums import (
+    EventRegistrationStatus,
+    EventVisibility,
+    PaymentStatus,
+    RegistrationStatus,
+    TeamMemberRole,
+    TeamMemberStatus,
+    TeamStatus,
+)
 from app.models.event import Event, EventRegistrationRule
 from app.models.profile import Profile
 from app.models.registration import Registration
@@ -76,6 +84,11 @@ async def create_registration(
     payload: RegistrationCreateRequest,
 ) -> Registration:
     event, rules = await _get_event_with_rules(db, event_id, for_update=True)
+
+    if event.visibility != EventVisibility.PUBLISHED:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This event is not available")
+    if event.registration_status != EventRegistrationStatus.OPEN:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Registration is not open for this event")
 
     remaining = await spots_remaining(db, event, rules)
     if not is_registration_open(event, rules, remaining):

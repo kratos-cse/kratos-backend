@@ -25,7 +25,8 @@ from app.core.errors import (
 )
 from app.models.admin import AdminUser
 from app.models.enums import (
-    EventStatus,
+    EventRegistrationStatus,
+    EventVisibility,
     MemberRegistrationMode,
     RegistrationStatus,
     TeamMemberEntrySource,
@@ -181,19 +182,15 @@ async def create_team(db: AsyncSession, event_id: uuid.UUID, profile: Profile, n
     event = result.scalar_one_or_none()
     if not event:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Event not found")
-    if event.status != EventStatus.OPEN:
+    if event.visibility != EventVisibility.PUBLISHED:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "This event is not available")
+    if event.registration_status != EventRegistrationStatus.OPEN:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Registration is not open for this event")
 
     rules = await _get_rules_or_404(db, event_id)
     _, _, total = roster_limits(rules)
     if total <= 1:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "This event does not support team registration")
-
-    now = datetime.now(timezone.utc)
-    if rules.registration_opens_at and now < rules.registration_opens_at:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Registration has not opened yet")
-    if rules.registration_closes_at and now > rules.registration_closes_at:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Registration has closed")
 
     remaining = await spots_remaining(db, event, rules)
     if remaining is not None and remaining <= 0:

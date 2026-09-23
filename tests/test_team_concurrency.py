@@ -21,7 +21,8 @@ from app.core.errors import ALREADY_REGISTERED, AppError, TEAM_FULL
 from app.models.enums import (
     CapacityType,
     EventCategory,
-    EventStatus,
+    EventRegistrationStatus,
+    EventVisibility,
     MemberRegistrationMode,
     PaymentStatus,
     RegistrationMode,
@@ -63,7 +64,8 @@ async def _team_event_committed(session_factory, *, capacity: int = 50, required
             category=EventCategory.TECHNICAL,
             fee=0,
             venue="Hall",
-            status=EventStatus.OPEN,
+            visibility=EventVisibility.PUBLISHED,
+            registration_status=EventRegistrationStatus.OPEN,
             capacity=capacity,
         )
         db.add(event)
@@ -163,7 +165,8 @@ async def test_concurrent_event_capacity_one_slot(concurrent_engine):
             category=EventCategory.TECHNICAL,
             fee=0,
             venue="Hall",
-            status=EventStatus.OPEN,
+            visibility=EventVisibility.PUBLISHED,
+            registration_status=EventRegistrationStatus.OPEN,
             capacity=1,
         )
         db.add(event)
@@ -291,7 +294,8 @@ async def test_concurrent_duplicate_registration(concurrent_engine):
             category=EventCategory.TECHNICAL,
             fee=0,
             venue="Hall",
-            status=EventStatus.OPEN,
+            visibility=EventVisibility.PUBLISHED,
+            registration_status=EventRegistrationStatus.OPEN,
             capacity=50,
         )
         db.add(event)

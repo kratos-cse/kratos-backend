@@ -9,7 +9,7 @@ from app.models.enums import (
     CapacityType,
     EventCategory,
     EventSlot,
-    EventStatus,
+    EventVisibility,
     MemberRegistrationMode,
     PaymentStatus,
     PaymentType,
@@ -34,7 +34,6 @@ class AdminEventCreate(BaseModel):
     starts_at: Optional[datetime] = None
     ends_at: Optional[datetime] = None
     slot: Optional[EventSlot] = None
-    status: EventStatus = EventStatus.OPEN
 
     registration_mode: RegistrationMode = RegistrationMode.TEAM_OR_INDIVIDUAL
     team_min_size: int = Field(default=1, ge=1)
@@ -46,8 +45,6 @@ class AdminEventCreate(BaseModel):
     capacity_type: CapacityType = CapacityType.PARTICIPANTS
     member_registration_mode: MemberRegistrationMode = MemberRegistrationMode.SELF_ENTRY
     custom_fields: Optional[dict[str, Any]] = None
-    registration_opens_at: Optional[datetime] = None
-    registration_closes_at: Optional[datetime] = None
 
 
 class AdminEventUpdate(BaseModel):
@@ -67,7 +64,6 @@ class AdminEventUpdate(BaseModel):
     starts_at: Optional[datetime] = None
     ends_at: Optional[datetime] = None
     slot: Optional[EventSlot] = None
-    status: Optional[EventStatus] = None
 
 
 class AdminRegistrationRulesUpdate(BaseModel):
@@ -81,8 +77,7 @@ class AdminRegistrationRulesUpdate(BaseModel):
     capacity_type: Optional[CapacityType] = None
     member_registration_mode: Optional[MemberRegistrationMode] = None
     custom_fields: Optional[dict[str, Any]] = None
-    registration_opens_at: Optional[datetime] = None
-    registration_closes_at: Optional[datetime] = None
+
 
 class AdminParticipantUpdate(BaseModel):
     full_name: Optional[str] = Field(default=None, min_length=1, max_length=200)

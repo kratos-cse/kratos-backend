@@ -16,7 +16,8 @@ from app.api.deps_admin import (
 from app.db.session import get_db
 from app.models.admin import AdminUser
 from app.models.enums import (
-    EventStatus,
+    EventRegistrationStatus,
+    EventVisibility,
     PaymentStatus,
     PaymentType,
     RegistrationMode,
@@ -41,6 +42,12 @@ from app.schemas.admin_ops import (
 from app.services import admin_ops_service as ops
 from app.services.registration_service import _already_registered
 from app.services.event_service import invalidate_events_list_cache, invalidate_spots_cache
+from app.services.event_state import (
+    close_registration,
+    open_registration,
+    publish_event,
+    unpublish_event,
+)
 
 router = APIRouter(prefix="/admin", tags=["Admin Operations"])
 
@@ -83,7 +90,8 @@ async def create_event(
         starts_at=body.starts_at,
         ends_at=body.ends_at,
         slot=body.slot,
-        status=body.status,
+        visibility=EventVisibility.UNPUBLISHED,
+        registration_status=EventRegistrationStatus.CLOSED,
     )
     db.add(event)
     await db.flush()
@@ -97,8 +105,6 @@ async def create_event(
         capacity_type=body.capacity_type,
         member_registration_mode=body.member_registration_mode,
         custom_fields=body.custom_fields,
-        registration_opens_at=body.registration_opens_at,
-        registration_closes_at=body.registration_closes_at,
     )
     ops.apply_registration_mode_to_rules(rules, body.registration_mode)
     if body.registration_mode != RegistrationMode.INDIVIDUAL_ONLY:
@@ -116,6 +122,25 @@ async def create_event(
     invalidate_events_list_cache()
     invalidate_spots_cache(event.id)
     return _success(await ops.event_to_dict_with_state(db, event, rules))
+
+
+@router.get("/events")
+async def list_admin_events(
+    db: AsyncSession = Depends(get_db),
+    _: AdminUser = Depends(get_current_active_admin),
+):
+    result = await db.execute(
+        select(Event, EventRegistrationRule)
+        .outerjoin(EventRegistrationRule, EventRegistrationRule.event_id == Event.id)
+        .order_by(Event.starts_at.nulls_last())
+    )
+    items = []
+    for event, rules in result.all():
+        if not rules:
+            continue
+        payload = await ops.event_to_dict_with_state(db, event, rules)
+        items.append(payload)
+    return _success(items)
 
 
 @router.get("/events/{event_id}")
@@ -177,14 +202,14 @@ async def patch_registration_rules(
     return _success(await ops.event_to_dict_with_state(db, event, rules))
 
 
-@router.post("/events/{event_id}/close")
-async def close_event(
+@router.post("/events/{event_id}/publish")
+async def publish_admin_event(
     event_id: UUID,
     db: AsyncSession = Depends(get_db),
     _: AdminUser = Depends(require_permission("event-management")),
 ):
     event, rules = await ops.get_event_with_rules(db, event_id)
-    event.status = EventStatus.CLOSED
+    publish_event(event)
     await db.commit()
     await db.refresh(event)
     invalidate_events_list_cache()
@@ -192,14 +217,44 @@ async def close_event(
     return _success(await ops.event_to_dict_with_state(db, event, rules))
 
 
-@router.post("/events/{event_id}/open")
-async def open_event(
+@router.post("/events/{event_id}/unpublish")
+async def unpublish_admin_event(
     event_id: UUID,
     db: AsyncSession = Depends(get_db),
     _: AdminUser = Depends(require_permission("event-management")),
 ):
     event, rules = await ops.get_event_with_rules(db, event_id)
-    event.status = EventStatus.OPEN
+    unpublish_event(event)
+    await db.commit()
+    await db.refresh(event)
+    invalidate_events_list_cache()
+    invalidate_spots_cache(event.id)
+    return _success(await ops.event_to_dict_with_state(db, event, rules))
+
+
+@router.post("/events/{event_id}/open-registration")
+async def open_event_registration(
+    event_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _: AdminUser = Depends(require_permission("event-management")),
+):
+    event, rules = await ops.get_event_with_rules(db, event_id)
+    open_registration(event)
+    await db.commit()
+    await db.refresh(event)
+    invalidate_events_list_cache()
+    invalidate_spots_cache(event.id)
+    return _success(await ops.event_to_dict_with_state(db, event, rules))
+
+
+@router.post("/events/{event_id}/close-registration")
+async def close_event_registration(
+    event_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _: AdminUser = Depends(require_permission("event-management")),
+):
+    event, rules = await ops.get_event_with_rules(db, event_id)
+    close_registration(event)
     await db.commit()
     await db.refresh(event)
     invalidate_events_list_cache()
