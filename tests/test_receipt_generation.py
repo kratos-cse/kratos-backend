@@ -119,3 +119,17 @@ def test_render_html_receipt_team():
     assert "Alan Turing" in rendered
     assert "LEADER" in rendered
     assert "₹1000.00" in rendered
+
+
+def test_receipt_auth_via_query_token():
+    from starlette.testclient import TestClient
+    from app.core.security import create_access_token
+
+    client = TestClient(app)
+    user_id = uuid.uuid4()
+    token, _ = create_access_token(user_id=user_id, email="tester@kratos.dev")
+    # Query with ?token= query parameter without Authorization header
+    res = client.get(f"/api/v1/users/me/profile?token={token}")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["contact_email"] == "tester@kratos.dev"

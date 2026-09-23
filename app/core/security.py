@@ -12,10 +12,10 @@ running this in production with more than one worker.
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Tuple
+from typing import Optional, Tuple
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Query, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -91,12 +91,14 @@ def invalidate_user_cache(user_id: uuid.UUID | None = None) -> None:
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    token: Optional[str] = Query(default=None),
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    if credentials is None:
+    raw_token = credentials.credentials if credentials else token
+    if not raw_token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
 
-    payload = decode_token(credentials.credentials)
+    payload = decode_token(raw_token)
     try:
         user_id = uuid.UUID(payload["sub"])
     except (KeyError, ValueError):

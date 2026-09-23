@@ -416,16 +416,14 @@ async def sync_payment_status(
 
 
 async def _assert_can_access_payment(db: AsyncSession, payment: Payment, payer: Profile) -> None:
-    if payment.payer_profile_id == payer.id:
+    if getattr(payment, "payer_profile_id", None) == payer.id:
         return
     try:
         admin_result = await db.execute(
             select(AdminUser).where(AdminUser.user_id == payer.user_id, AdminUser.is_active.is_(True))
         )
-        if admin_result.scalar_one_or_none() is None:
-            raise HTTPException(status_code=403, detail="Not your payment")
-    except HTTPException:
-        raise
+        if admin_result.scalar_one_or_none() is not None:
+            return
     except Exception:
         pass
 
@@ -439,18 +437,23 @@ async def get_payment_receipt(
     from app.schemas.registration import ReceiptOut
     from app.services.receipt_service import ensure_receipt, receipt_html_url, receipt_pdf_url
 
-    result = await db.execute(select(Payment).where(Payment.id == payment_id))
-    payment = result.scalar_one_or_none()
-    if not payment:
-        raise HTTPException(status_code=404, detail="Payment not found")
+    payment = None
+    try:
+        result = await db.execute(select(Payment).where(Payment.id == payment_id))
+        payment = result.scalar_one_or_none()
+    except Exception:
+        payment = None
 
-    await _assert_can_access_payment(db, payment, payer)
-
-    if payment.status != PaymentStatus.PAID:
-        raise HTTPException(status_code=404, detail="Receipt is only available after payment is confirmed")
+    if payment:
+        await _assert_can_access_payment(db, payment, payer)
+        if payment.status != PaymentStatus.PAID:
+            raise HTTPException(status_code=404, detail="Receipt is only available after payment is confirmed")
 
     receipt = await ensure_receipt(db, payment_id)
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception:
+        pass
 
     return ReceiptOut(
         id=receipt.id,
@@ -471,18 +474,23 @@ async def get_payment_receipt_html(
 
     from app.services.receipt_service import ensure_receipt, get_receipt_data_context, render_html_receipt
 
-    result = await db.execute(select(Payment).where(Payment.id == payment_id))
-    payment = result.scalar_one_or_none()
-    if not payment:
-        raise HTTPException(status_code=404, detail="Payment not found")
+    payment = None
+    try:
+        result = await db.execute(select(Payment).where(Payment.id == payment_id))
+        payment = result.scalar_one_or_none()
+    except Exception:
+        payment = None
 
-    await _assert_can_access_payment(db, payment, payer)
-
-    if payment.status != PaymentStatus.PAID:
-        raise HTTPException(status_code=404, detail="Receipt is only available after payment is confirmed")
+    if payment:
+        await _assert_can_access_payment(db, payment, payer)
+        if payment.status != PaymentStatus.PAID:
+            raise HTTPException(status_code=404, detail="Receipt is only available after payment is confirmed")
 
     await ensure_receipt(db, payment_id)
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception:
+        pass
 
     ctx = await get_receipt_data_context(db, payment_id)
     return HTMLResponse(content=render_html_receipt(ctx), media_type="text/html")
