@@ -1,4 +1,7 @@
 """Admin RBAC dependencies — real JWT user -> admin_users -> roles."""
+import time
+from uuid import UUID
+
 from fastapi import Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,11 +12,28 @@ from app.db.session import get_db
 from app.models.admin import SUPER_ADMIN_ROLE_NAME, AdminUser, Role
 from app.models.user import User
 
+_ADMIN_CACHE_TTL_SEC = 30.0
+_admin_cache: dict[UUID, tuple[float, AdminUser]] = {}
+
+
+def invalidate_admin_cache(user_id: UUID | None = None) -> None:
+    if user_id is not None:
+        _admin_cache.pop(user_id, None)
+    else:
+        _admin_cache.clear()
+
 
 async def get_current_active_admin(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> AdminUser:
+    now = time.monotonic()
+    cached = _admin_cache.get(current_user.id)
+    if cached is not None:
+        exp, admin_obj = cached
+        if now < exp:
+            return admin_obj
+
     result = await db.execute(
         select(AdminUser)
         .options(selectinload(AdminUser.role).selectinload(Role.permissions))
@@ -25,6 +45,7 @@ async def get_current_active_admin(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have active administrative privileges.",
         )
+    _admin_cache[current_user.id] = (now + _ADMIN_CACHE_TTL_SEC, admin)
     return admin
 
 

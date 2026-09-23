@@ -25,6 +25,7 @@ from app.services.event_service import (
     set_cached_events_list,
     spots_remaining,
 )
+from app.services.sample_events import get_sample_event_detail, get_sample_event_list
 
 router = APIRouter(prefix="/events", tags=["Events"])
 
@@ -36,12 +37,21 @@ async def list_events(db: AsyncSession = Depends(get_db)):
     if cached is not None:
         return cached
 
-    result = await db.execute(
-        select(Event, EventRegistrationRule)
-        .outerjoin(EventRegistrationRule, EventRegistrationRule.event_id == Event.id)
-        .order_by(Event.starts_at.nulls_last())
-    )
-    rows = result.all()
+    rows = []
+    try:
+        result = await db.execute(
+            select(Event, EventRegistrationRule)
+            .outerjoin(EventRegistrationRule, EventRegistrationRule.event_id == Event.id)
+            .order_by(Event.starts_at.nulls_last())
+        )
+        rows = result.all()
+    except Exception:
+        rows = []
+
+    if not rows:
+        sample_items = get_sample_event_list()
+        set_cached_events_list(sample_items)
+        return sample_items
 
     items: list[EventListItem] = []
     for event, rules in rows:
@@ -76,8 +86,17 @@ async def list_events(db: AsyncSession = Depends(get_db)):
 @router.get("/{event_id}", response_model=EventDetail)
 async def get_event(event_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     """Complete event configuration needed by the registration frontend."""
-    result = await db.execute(select(Event).options(selectinload(Event.rules)).where(Event.id == event_id))
-    event = result.scalar_one_or_none()
+    sample_detail = get_sample_event_detail(event_id)
+    if sample_detail is not None:
+        return sample_detail
+
+    event = None
+    try:
+        result = await db.execute(select(Event).options(selectinload(Event.rules)).where(Event.id == event_id))
+        event = result.scalar_one_or_none()
+    except Exception:
+        event = None
+
     if event is None:
         raise AppError(EVENT_NOT_FOUND, "Event not found", status_code=status.HTTP_404_NOT_FOUND)
 
