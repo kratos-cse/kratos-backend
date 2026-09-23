@@ -213,7 +213,10 @@ async def verify_payment(
     db: AsyncSession = Depends(get_db),
     payer: Profile = Depends(get_current_profile),
 ):
-    if body.razorpay_order_id.startswith("order_mock_") or not settings.RAZORPAY_KEY_SECRET:
+    env = (settings.ENVIRONMENT or "development").strip().lower()
+    is_dev = env in ("development", "test", "testing")
+
+    if is_dev and (body.razorpay_order_id.startswith("order_mock_") or not settings.RAZORPAY_KEY_SECRET):
         # Dev payment verification
         from app.services.sample_events import _DEV_REGISTRATIONS
         from app.schemas.registration import PaymentSummary

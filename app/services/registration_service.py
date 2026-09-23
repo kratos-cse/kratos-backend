@@ -23,6 +23,7 @@ from app.models.registration import Registration
 from app.models.team import Team, TeamMember
 from app.schemas.registration import RegistrationCreateRequest, RegistrationType
 from app.services import qr_service
+from app.db.session import is_db_configured
 from app.services.event_service import invalidate_spots_cache, is_registration_open, spots_remaining
 from app.services.admin_ops_service import invalidate_dashboard_cache
 from app.services import audit_service
@@ -191,15 +192,16 @@ async def get_registration_or_404(db: AsyncSession, registration_id: uuid.UUID):
     if dev_reg is not None:
         return dev_reg
 
-    try:
-        result = await db.execute(
-            select(Registration).options(*_REGISTRATION_LOAD_OPTS).where(Registration.id == registration_id)
-        )
-        registration = result.scalar_one_or_none()
-        if registration is not None:
-            return registration
-    except Exception:
-        pass
+    if is_db_configured():
+        try:
+            result = await db.execute(
+                select(Registration).options(*_REGISTRATION_LOAD_OPTS).where(Registration.id == registration_id)
+            )
+            registration = result.scalar_one_or_none()
+            if registration is not None:
+                return registration
+        except Exception:
+            pass
 
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Registration not found")
 
@@ -218,18 +220,19 @@ async def assert_can_view_registration(
         if team and getattr(team, "members", None):
             if any(m.profile_id == profile.id for m in team.members):
                 return
-        try:
-            result = await db.execute(
-                select(TeamMember).where(
-                    TeamMember.team_id == getattr(registration, "team_id", None),
-                    TeamMember.profile_id == profile.id,
-                    TeamMember.status.notin_([TeamMemberStatus.LEFT, TeamMemberStatus.REMOVED]),
+        if is_db_configured():
+            try:
+                result = await db.execute(
+                    select(TeamMember).where(
+                        TeamMember.team_id == getattr(registration, "team_id", None),
+                        TeamMember.profile_id == profile.id,
+                        TeamMember.status.notin_([TeamMemberStatus.LEFT, TeamMemberStatus.REMOVED]),
+                    )
                 )
-            )
-            if result.scalar_one_or_none() is not None:
-                return
-        except Exception:
-            pass
+                if result.scalar_one_or_none() is not None:
+                    return
+            except Exception:
+                pass
     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You do not have access to this registration")
 
 
@@ -238,30 +241,31 @@ async def list_my_registrations(db: AsyncSession, profile: Profile) -> list:
     dev_regs = list_dev_registrations(profile.id)
 
     db_regs = []
-    try:
-        solo_result = await db.execute(
-            select(Registration).options(*_REGISTRATION_LOAD_OPTS).where(Registration.profile_id == profile.id)
-        )
-        solo_regs = list(solo_result.scalars().all())
-
-        team_ids_result = await db.execute(
-            select(TeamMember.team_id).where(
-                TeamMember.profile_id == profile.id,
-                TeamMember.status.notin_([TeamMemberStatus.LEFT, TeamMemberStatus.REMOVED]),
+    if is_db_configured():
+        try:
+            solo_result = await db.execute(
+                select(Registration).options(*_REGISTRATION_LOAD_OPTS).where(Registration.profile_id == profile.id)
             )
-        )
-        team_ids = [row[0] for row in team_ids_result.all()]
+            solo_regs = list(solo_result.scalars().all())
 
-        team_regs: list[Registration] = []
-        if team_ids:
-            team_reg_result = await db.execute(
-                select(Registration).options(*_REGISTRATION_LOAD_OPTS).where(Registration.team_id.in_(team_ids))
+            team_ids_result = await db.execute(
+                select(TeamMember.team_id).where(
+                    TeamMember.profile_id == profile.id,
+                    TeamMember.status.notin_([TeamMemberStatus.LEFT, TeamMemberStatus.REMOVED]),
+                )
             )
-            team_regs = list(team_reg_result.scalars().all())
+            team_ids = [row[0] for row in team_ids_result.all()]
 
-        db_regs = solo_regs + team_regs
-    except Exception:
-        db_regs = []
+            team_regs: list[Registration] = []
+            if team_ids:
+                team_reg_result = await db.execute(
+                    select(Registration).options(*_REGISTRATION_LOAD_OPTS).where(Registration.team_id.in_(team_ids))
+                )
+                team_regs = list(team_reg_result.scalars().all())
+
+            db_regs = solo_regs + team_regs
+        except Exception:
+            db_regs = []
 
     return dev_regs + db_regs
 

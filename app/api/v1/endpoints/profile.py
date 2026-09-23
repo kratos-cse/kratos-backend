@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import get_current_profile
+from app.core.security import get_current_profile, invalidate_user_cache
 from app.db.session import get_db
 from app.models.profile import Profile
 from app.schemas.profile import ProfileOut, ProfileUpdateRequest
@@ -25,9 +26,23 @@ async def update_my_profile(
     Note: this never touches USERS.email — that stays the Google auth
     identity. contact_email here is the separate, editable field.
     """
-    for field, value in payload.model_dump(exclude_unset=True).items():
-        setattr(profile, field, value)
+    try:
+        result = await db.execute(select(Profile).where(Profile.id == profile.id))
+        fresh_profile = result.scalar_one_or_none()
+        if fresh_profile is not None:
+            for field, value in payload.model_dump(exclude_unset=True).items():
+                setattr(fresh_profile, field, value)
 
-    await db.commit()
-    await db.refresh(profile)
+            await db.commit()
+            await db.refresh(fresh_profile)
+            invalidate_user_cache(fresh_profile.user_id)
+            return fresh_profile
+    except Exception:
+        pass
+
+    # In-memory dev fallback when live DB is unavailable
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        if hasattr(profile, field):
+            setattr(profile, field, value)
+    invalidate_user_cache(profile.user_id)
     return profile

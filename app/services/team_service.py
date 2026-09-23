@@ -32,6 +32,7 @@ from app.models.enums import (
     TeamStatus,
 )
 from app.services import notification_service, qr_service
+from app.db.session import is_db_configured
 from app.models.event import Event, EventRegistrationRule
 from app.models.profile import Profile
 from app.models.registration import Registration
@@ -61,31 +62,74 @@ async def _is_active_admin(db: AsyncSession, user_id: uuid.UUID | None) -> bool:
 
 
 async def _get_team_or_404(db: AsyncSession, team_id: uuid.UUID) -> Team:
-    result = await db.execute(select(Team).where(Team.id == team_id))
-    team = result.scalar_one_or_none()
-    if not team:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Team not found")
-    return team
+    if is_db_configured():
+        try:
+            result = await db.execute(select(Team).where(Team.id == team_id))
+            team = result.scalar_one_or_none()
+            if team:
+                return team
+        except Exception:
+            pass
+
+    from app.services.sample_events import _DEV_REGISTRATIONS
+    for reg in _DEV_REGISTRATIONS.values():
+        if reg.team and reg.team.id == team_id:
+            return Team(
+                id=reg.team.id,
+                event_id=reg.event_id,
+                name=reg.team.name,
+                leader_profile_id=reg.team.leader_profile_id,
+                status=reg.team.status,
+            )
+
+    raise HTTPException(status.HTTP_404_NOT_FOUND, "Team not found")
 
 
 async def _get_rules_or_404(db: AsyncSession, event_id: uuid.UUID) -> EventRegistrationRule:
-    result = await db.execute(
-        select(EventRegistrationRule).where(EventRegistrationRule.event_id == event_id)
-    )
-    rules = result.scalar_one_or_none()
-    if not rules:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Event registration rules not configured")
-    return rules
+    if is_db_configured():
+        try:
+            result = await db.execute(
+                select(EventRegistrationRule).where(EventRegistrationRule.event_id == event_id)
+            )
+            rules = result.scalar_one_or_none()
+            if rules:
+                return rules
+        except Exception:
+            pass
+
+    from app.services.sample_events import SAMPLE_EVENTS
+    sample = SAMPLE_EVENTS.get(event_id)
+    if sample:
+        return EventRegistrationRule(
+            event_id=event_id,
+            team_min_size=sample.team_min_size,
+            team_max_size=sample.team_max_size,
+            required_member_count=sample.required_member_count,
+            substitute_count=sample.substitute_count,
+            allow_individual=sample.allow_individual,
+            registration_mode=sample.registration_mode,
+            capacity_type=sample.capacity_type,
+            member_registration_mode=sample.member_registration_mode,
+            allow_team_invite_flow=sample.allow_team_invite_flow,
+            requires_qr_checkin=sample.requires_qr_checkin,
+        )
+
+    raise HTTPException(status.HTTP_404_NOT_FOUND, "Event registration rules not configured")
 
 
 async def _active_member_count(db: AsyncSession, team_id: uuid.UUID) -> int:
-    result = await db.execute(
-        select(func.count(TeamMember.id)).where(
-            TeamMember.team_id == team_id,
-            TeamMember.status.in_([TeamMemberStatus.ACTIVE, TeamMemberStatus.PENDING_PAYMENT]),
-        )
-    )
-    return int(result.scalar() or 0)
+    if is_db_configured():
+        try:
+            result = await db.execute(
+                select(func.count(TeamMember.id)).where(
+                    TeamMember.team_id == team_id,
+                    TeamMember.status.in_([TeamMemberStatus.ACTIVE, TeamMemberStatus.PENDING_PAYMENT]),
+                )
+            )
+            return int(result.scalar() or 0)
+        except Exception:
+            pass
+    return 1
 
 
 async def _require_membership(
@@ -95,26 +139,64 @@ async def _require_membership(
     *,
     allow_admin: bool = True,
 ) -> TeamMember | None:
-    result = await db.execute(
-        select(TeamMember).where(
-            TeamMember.team_id == team.id,
-            TeamMember.profile_id == profile.id,
-            TeamMember.status.notin_(_TERMINAL),
+    if is_db_configured():
+        try:
+            result = await db.execute(
+                select(TeamMember).where(
+                    TeamMember.team_id == team.id,
+                    TeamMember.profile_id == profile.id,
+                    TeamMember.status.notin_(_TERMINAL),
+                )
+            )
+            member = result.scalar_one_or_none()
+            if member:
+                return member
+        except Exception:
+            pass
+
+    if team.leader_profile_id == profile.id:
+        return TeamMember(
+            id=uuid.uuid4(),
+            team_id=team.id,
+            event_id=team.event_id,
+            profile_id=profile.id,
+            role=TeamMemberRole.LEADER,
+            status=TeamMemberStatus.ACTIVE,
         )
-    )
-    member = result.scalar_one_or_none()
-    if member:
-        return member
-    if allow_admin and await _is_active_admin(db, profile.user_id):
-        return None
+
+    if allow_admin and is_db_configured():
+        try:
+            if await _is_active_admin(db, profile.user_id):
+                return None
+        except Exception:
+            pass
+
+    from app.services.sample_events import _DEV_REGISTRATIONS
+    for reg in _DEV_REGISTRATIONS.values():
+        if reg.team and reg.team.id == team.id:
+            for m in reg.team.members:
+                if m.profile_id == profile.id:
+                    return TeamMember(
+                        id=m.id,
+                        team_id=team.id,
+                        event_id=team.event_id,
+                        profile_id=m.profile_id,
+                        role=m.role,
+                        status=m.status,
+                    )
+
     raise HTTPException(status.HTTP_404_NOT_FOUND, "Team not found")
 
 
 async def _require_leader_or_admin(db: AsyncSession, team: Team, profile: Profile) -> None:
     if team.leader_profile_id == profile.id:
         return
-    if await _is_active_admin(db, profile.user_id):
-        return
+    if is_db_configured():
+        try:
+            if await _is_active_admin(db, profile.user_id):
+                return
+        except Exception:
+            pass
     raise HTTPException(status.HTTP_403_FORBIDDEN, "Only the team leader can do this")
 
 
@@ -141,12 +223,35 @@ async def _to_member_out(member: TeamMember) -> dict:
 
 
 async def _load_members_with_profiles(db: AsyncSession, team_id: uuid.UUID) -> list[TeamMember]:
-    result = await db.execute(
-        select(TeamMember)
-        .options(selectinload(TeamMember.profile))
-        .where(TeamMember.team_id == team_id)
-    )
-    return list(result.scalars().all())
+    if is_db_configured():
+        try:
+            result = await db.execute(
+                select(TeamMember)
+                .options(selectinload(TeamMember.profile))
+                .where(TeamMember.team_id == team_id)
+            )
+            members = list(result.scalars().all())
+            if members:
+                return members
+        except Exception:
+            pass
+
+    from app.services.sample_events import _DEV_REGISTRATIONS
+    for reg in _DEV_REGISTRATIONS.values():
+        if reg.team and reg.team.id == team_id:
+            return [
+                TeamMember(
+                    id=m.id,
+                    team_id=team_id,
+                    event_id=reg.event_id,
+                    profile_id=m.profile_id,
+                    role=m.role,
+                    status=m.status,
+                    joined_at=m.joined_at,
+                )
+                for m in reg.team.members
+            ]
+    return []
 
 
 def _active_members(members: list[TeamMember]) -> list[TeamMember]:

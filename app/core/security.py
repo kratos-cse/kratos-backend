@@ -21,7 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.db.session import get_db
+from app.db.session import get_db, is_db_configured
 from app.models.profile import Profile
 from app.models.user import User
 
@@ -112,11 +112,12 @@ async def get_current_user(
             return user_obj
 
     user = None
-    try:
-        result = await db.execute(select(User).where(User.id == user_id))
-        user = result.scalar_one_or_none()
-    except Exception:
-        user = None
+    if is_db_configured():
+        try:
+            result = await db.execute(select(User).where(User.id == user_id))
+            user = result.scalar_one_or_none()
+        except Exception:
+            user = None
 
     if user is None:
         email = payload.get("email") or f"user-{str(user_id)[:8]}@kratos.dev"
@@ -129,6 +130,11 @@ async def get_current_user(
             created_at=datetime.now(timezone.utc),
             last_login_at=datetime.now(timezone.utc),
         )
+    else:
+        try:
+            db.expunge(user)
+        except Exception:
+            pass
 
     _user_cache[user_id] = (now + _USER_CACHE_TTL_SEC, user)
     return user
@@ -139,26 +145,35 @@ async def get_current_profile(
     db: AsyncSession = Depends(get_db),
 ) -> Profile:
     now = time.monotonic()
-    cached = _profile_cache.get(current_user.id)
-    if cached is not None:
-        exp, prof_obj = cached
-        if now < exp:
-            return prof_obj
+    u_id = getattr(current_user, "id", None)
+    if u_id is not None:
+        cached = _profile_cache.get(u_id)
+        if cached is not None:
+            exp, prof_obj = cached
+            if now < exp:
+                return prof_obj
 
     profile = None
-    try:
-        result = await db.execute(select(Profile).where(Profile.user_id == current_user.id))
-        profile = result.scalar_one_or_none()
-    except Exception:
-        profile = None
+    if is_db_configured():
+        try:
+            result = await db.execute(select(Profile).where(Profile.user_id == current_user.id))
+            profile = result.scalar_one_or_none()
+            if profile is not None:
+                try:
+                    db.expunge(profile)
+                except Exception:
+                    pass
+        except Exception:
+            profile = None
 
     if profile is None:
         name = "Dev Tester"
-        if "admin" in str(current_user.email).lower():
+        u_email = str(getattr(current_user, "email", "") or "")
+        if "admin" in u_email.lower():
             name = "Super Admin"
-        elif "leader" in str(current_user.email).lower():
+        elif "leader" in u_email.lower():
             name = "Priya Captain"
-        elif "participant" in str(current_user.email).lower():
+        elif "participant" in u_email.lower():
             name = "Aarav Participant"
 
         profile_id = uuid.uuid5(uuid.NAMESPACE_DNS, f"profile-{current_user.id}")
@@ -166,7 +181,7 @@ async def get_current_profile(
             id=profile_id,
             user_id=current_user.id,
             full_name=name,
-            contact_email=str(current_user.email),
+            contact_email=u_email,
             college_name="KRATOS Institute of Technology",
             phone="+91 98765 43210",
             department="Computer Science",
@@ -175,5 +190,6 @@ async def get_current_profile(
             updated_at=datetime.now(timezone.utc),
         )
 
-    _profile_cache[current_user.id] = (now + _USER_CACHE_TTL_SEC, profile)
+    if u_id is not None:
+        _profile_cache[u_id] = (now + _USER_CACHE_TTL_SEC, profile)
     return profile
