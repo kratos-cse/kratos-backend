@@ -19,8 +19,8 @@ from app.models.profile import Profile
 from app.models.registration import Registration
 from app.models.team import Team, TeamMember
 from app.schemas.event import EventDetail, EventListItem, EventWhatsAppOut
-from app.services.event_projection import build_event_state
-from app.services.event_service import get_cached_events_list, set_cached_events_list
+from app.services.event_projection import build_event_state, build_event_state_from_remaining
+from app.services.event_service import batch_spots_remaining, get_cached_events_list, set_cached_events_list
 
 router = APIRouter(prefix="/events", tags=["Events"])
 
@@ -40,9 +40,11 @@ async def list_events(db: AsyncSession = Depends(get_db)):
     )
     rows = result.all()
 
+    remaining_by_event = await batch_spots_remaining(db, rows)
+
     items: list[EventListItem] = []
     for event, rules in rows:
-        state = await build_event_state(db, event, rules)
+        state = build_event_state_from_remaining(event, rules, remaining_by_event.get(event.id))
         items.append(
             EventListItem(
                 id=event.id,

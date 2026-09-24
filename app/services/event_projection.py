@@ -25,15 +25,19 @@ def _substitute_count(rules: Optional[EventRegistrationRule]) -> int:
     return max(0, int(rules.team_max_size) - int(rules.team_min_size))
 
 
-async def build_event_state(
-    db: AsyncSession, event: Event, rules: Optional[EventRegistrationRule]
+def build_event_state_from_remaining(
+    event: Event,
+    rules: Optional[EventRegistrationRule],
+    spots_remaining_count: Optional[int],
 ) -> dict[str, Any]:
-    """Derived registration fields used by public and admin responses."""
-    availability, remaining = await registration_availability_for_event(db, event, rules)
+    """Sync projection when spots remaining is already known (e.g. batched list)."""
+    from app.services.event_service import resolve_registration_availability  # local: avoid cycle at import
+
+    availability = resolve_registration_availability(event, rules, spots_remaining_count)
     return {
         "registration_availability": availability,
-        "registration_open": is_registration_open(event, rules, remaining),
-        "spots_remaining": remaining,
+        "registration_open": is_registration_open(event, rules, spots_remaining_count),
+        "spots_remaining": spots_remaining_count,
         "allow_individual": rules.allow_individual if rules else True,
         "registration_mode": rules.registration_mode if rules else None,
         "team_min_size": _rule_int(rules, "team_min_size", 1),
@@ -41,3 +45,11 @@ async def build_event_state(
         "required_member_count": _rule_int(rules, "required_member_count", _rule_int(rules, "team_min_size", 1)),
         "substitute_count": _substitute_count(rules),
     }
+
+
+async def build_event_state(
+    db: AsyncSession, event: Event, rules: Optional[EventRegistrationRule]
+) -> dict[str, Any]:
+    """Derived registration fields used by public and admin responses."""
+    availability, remaining = await registration_availability_for_event(db, event, rules)
+    return build_event_state_from_remaining(event, rules, remaining)

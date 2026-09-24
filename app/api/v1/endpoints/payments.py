@@ -26,6 +26,7 @@ from app.models.team import Team
 from app.payments.amounts import compute_amount_paise
 from app.payments.apply import apply_payment_failure, apply_payment_success
 from app.payments.razorpay_client import get_razorpay, with_retry_async
+from app.payments.admin_delete import admin_delete_payment
 from app.payments.refund import RefundError, refund_payment
 from app.payments.signatures import verify_checkout_signature, verify_webhook_signature
 
@@ -481,3 +482,13 @@ async def admin_refund(
         "refundId": result.refund_id,
         "refundAmountPaise": result.refund_amount_paise,
     }
+
+
+@router.delete("/admin/payments/{payment_id}")
+async def admin_delete_payment_record(
+    payment_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(require_super_admin),
+):
+    """Permanent delete — SUPER ADMIN only. Blocks PAID/REFUNDED records."""
+    return await admin_delete_payment(db, payment_id, admin)

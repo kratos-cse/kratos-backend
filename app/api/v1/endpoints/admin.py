@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps_admin import get_current_active_admin, invalidate_admin_cache, require_super_admin
+from app.services import admin_delete_service
 from app.db.session import get_db
 from app.models.admin import AdminUser, Permission, Role
 from app.models.user import User
@@ -211,3 +212,13 @@ async def update_admin_user(
         "status": "success",
         "data": {"admin_user_id": admin.id, "is_active": admin.is_active},
     }
+
+
+@router.delete("/admin-users/{admin_user_id}")
+async def delete_admin_user_record(
+    admin_user_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    actor: AdminUser = Depends(require_super_admin),
+):
+    data = await admin_delete_service.admin_delete_admin_user(db, admin_user_id, actor)
+    return {"status": "success", "data": data}

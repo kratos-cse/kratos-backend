@@ -39,7 +39,7 @@ from app.schemas.admin_ops import (
     AdminTeamUpdate,
     TransferLeadershipBody,
 )
-from app.services import admin_ops_service as ops
+from app.services import admin_delete_service, admin_ops_service as ops
 from app.services.registration_service import _already_registered
 from app.services.event_service import invalidate_events_list_cache, invalidate_spots_cache
 from app.services.event_state import (
@@ -262,6 +262,15 @@ async def close_event_registration(
     return _success(await ops.event_to_dict_with_state(db, event, rules))
 
 
+@router.delete("/events/{event_id}")
+async def delete_event_record(
+    event_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(require_super_admin),
+):
+    return _success(await admin_delete_service.admin_delete_event(db, event_id, admin))
+
+
 @router.get("/participants")
 async def list_participants(
     q: Optional[str] = Query(default=None),
@@ -288,6 +297,15 @@ async def list_participants(
         for p in profiles
     ]
     return _success({"items": data, "total": total, "skip": skip, "limit": limit})
+
+
+@router.delete("/participants/{profile_id}")
+async def delete_participant_record(
+    profile_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(require_super_admin),
+):
+    return _success(await admin_delete_service.admin_delete_participant(db, profile_id, admin))
 
 
 @router.patch("/participants/{profile_id}")
@@ -433,6 +451,15 @@ async def cancel_team(
     return _success(await ops.cancel_team_admin(db, team_id))
 
 
+@router.delete("/teams/{team_id}")
+async def delete_team_record(
+    team_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(require_super_admin),
+):
+    return _success(await admin_delete_service.admin_delete_team(db, team_id, admin))
+
+
 @router.get("/registrations")
 async def list_registrations(
     event_id: Optional[UUID] = Query(default=None),
@@ -499,6 +526,15 @@ async def cancel_registration(
 ):
     registration = await ops.cancel_registration_admin(db, registration_id)
     return _success({"id": registration.id, "status": registration.status})
+
+
+@router.delete("/registrations/{registration_id}")
+async def delete_registration_record(
+    registration_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(require_super_admin),
+):
+    return _success(await admin_delete_service.admin_delete_registration(db, registration_id, admin))
 
 
 @router.get("/payments")

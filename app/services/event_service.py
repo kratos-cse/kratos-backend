@@ -129,6 +129,81 @@ def invalidate_spots_cache(event_id: object | None = None) -> None:
         _spots_cache.clear()
 
 
+async def batch_spots_remaining(
+    db: AsyncSession,
+    rows: list[tuple[Event, Optional[EventRegistrationRule]]],
+) -> dict[object, Optional[int]]:
+    """
+    Batch capacity lookup for list endpoints — avoids N+1 per-event count queries.
+    Returns event_id -> remaining (None when event has no capacity cap).
+    """
+    result: dict[object, Optional[int]] = {}
+    uncached: list[tuple[Event, Optional[EventRegistrationRule]]] = []
+    now = time.monotonic()
+
+    for event, rules in rows:
+        if event.capacity is None:
+            result[event.id] = None
+            continue
+        cached = _spots_cache.get(event.id)
+        if cached is not None and now < cached[0]:
+            result[event.id] = cached[1]
+        else:
+            uncached.append((event, rules))
+
+    if not uncached:
+        return result
+
+    team_ids = [event.id for event, rules in uncached if rules and rules.capacity_type == CapacityType.TEAMS]
+    participant_ids = [
+        event.id for event, rules in uncached if not rules or rules.capacity_type != CapacityType.TEAMS
+    ]
+
+    used: dict[object, int] = {}
+
+    if team_ids:
+        team_rows = await db.execute(
+            select(Team.event_id, func.count())
+            .where(Team.event_id.in_(team_ids), Team.status != TeamStatus.CANCELLED)
+            .group_by(Team.event_id)
+        )
+        for event_id, count in team_rows.all():
+            used[event_id] = int(count)
+
+    if participant_ids:
+        solo_rows = await db.execute(
+            select(Registration.event_id, func.count())
+            .where(
+                Registration.event_id.in_(participant_ids),
+                Registration.profile_id.isnot(None),
+                Registration.status != RegistrationStatus.CANCELLED,
+            )
+            .group_by(Registration.event_id)
+        )
+        solo_by_event = {event_id: int(count) for event_id, count in solo_rows.all()}
+
+        member_rows = await db.execute(
+            select(TeamMember.event_id, func.count())
+            .where(
+                TeamMember.event_id.in_(participant_ids),
+                TeamMember.status.in_([TeamMemberStatus.ACTIVE, TeamMemberStatus.PENDING_PAYMENT]),
+            )
+            .group_by(TeamMember.event_id)
+        )
+        member_by_event = {event_id: int(count) for event_id, count in member_rows.all()}
+
+        for event_id in participant_ids:
+            used[event_id] = solo_by_event.get(event_id, 0) + member_by_event.get(event_id, 0)
+
+    for event, _rules in uncached:
+        consumed = used.get(event.id, 0)
+        remaining = max(int(event.capacity) - consumed, 0)
+        result[event.id] = remaining
+        _spots_cache[event.id] = (now + _SPOTS_CACHE_TTL_SEC, remaining)
+
+    return result
+
+
 async def spots_remaining(
     db: AsyncSession, event: Event, rules: Optional[EventRegistrationRule]
 ) -> Optional[int]:
