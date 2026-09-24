@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     SMTP_FROM: str = ""
     SMTP_TLS: bool = True
 
+    # --- Mailjet (separate transactional email system) ---
+    MAILJET_API_KEY: str = ""
+    MAILJET_SECRET_KEY: str = ""
+    MAILJET_FROM_EMAIL: str = ""
+    MAILJET_FROM_NAME: str = "KRATOS'26"
+
     # --- Public URLs (receipts are generated on demand; no file storage) ---
     APP_PUBLIC_BASE_URL: str = "http://localhost:8000"
 

@@ -31,3 +31,6 @@ qrcode[pil]>=7.4,<9.0
 
 # --- Admin exports ---
 openpyxl>=3.1,<4.0
+
+# --- Transactional email ---
+mailjet-rest>=1.3,<2.0
