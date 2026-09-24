@@ -9,13 +9,11 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.enums import PaymentStatus, PaymentType, RegistrationStatus, TeamMemberRole, TeamMemberStatus, TeamStatus
-from app.models.event import Event
 from app.models.payment import Payment
 from app.models.registration import Registration
 from app.models.team import Team, TeamMember
 from app.payments.handoffs import issue_receipt, trigger_qr
 from app.services import notification_service
-from app.services.email_triggers import trigger_email
 
 logger = logging.getLogger("payments.apply")
 
@@ -220,26 +218,6 @@ async def apply_payment_success(
 
     invalidate_spots_cache()
     invalidate_dashboard_cache()
-
-    registration_event_result = await db.execute(
-        select(Registration, Event)
-        .join(Event, Event.id == Registration.event_id)
-        .where(Registration.payment_id == row.id)
-    )
-    registration_event = registration_event_result.one_or_none()
-    registration, event = registration_event if registration_event else (None, None)
-    payer_email = await notification_service._resolve_email(db, row.payer_profile_id)
-    if payer_email:
-        await trigger_email(
-            to_email=payer_email,
-            subject=f"Payment confirmed - {event.name if event else 'KRATOS registration'}",
-            text_body=(
-                f"Your payment of INR {row.amount_paise / 100:.2f} has been confirmed.\n\n"
-                f"Event: {event.name if event else 'KRATOS registration'}\n"
-                f"Registration ID: {registration.id if registration else 'unavailable'}\n"
-                f"Payment ID: {row.id}\n"
-            ),
-        )
 
     await notification_service.notify_payment_confirmed(db, row.id)
     return ApplyResult(applied=True, payment=row)

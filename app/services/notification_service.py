@@ -137,6 +137,34 @@ def _html_from_plain(body: str, subject: str) -> str:
     )
 
 
+def _mailjet_configured() -> bool:
+    return bool(
+        settings.MAILJET_API_KEY
+        and settings.MAILJET_SECRET_KEY
+        and settings.MAILJET_FROM_EMAIL
+    )
+
+
+async def _send_email(
+    to_email: str,
+    subject: str,
+    body: str,
+    *,
+    html_body: Optional[str] = None,
+) -> tuple[bool, Optional[str]]:
+    """Prefer Mailjet when configured; otherwise fall back to SMTP."""
+    if _mailjet_configured():
+        from app.services.email_service import send_email
+
+        return await send_email(
+            to_email=to_email,
+            subject=subject,
+            text_body=body,
+            html_body=html_body,
+        )
+    return await _send_smtp(to_email, subject, body, html_body=html_body)
+
+
 async def _send_smtp(
     to_email: str,
     subject: str,
@@ -184,7 +212,7 @@ async def _deliver_notification_bg(
 ) -> None:
     from app.db.session import AsyncSessionLocal
 
-    ok, err = await _send_smtp(to_email, subject, body, html_body=html_body)
+    ok, err = await _send_email(to_email, subject, body, html_body=html_body)
     try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(select(Notification).where(Notification.id == notification_id))

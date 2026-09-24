@@ -1,19 +1,24 @@
+import asyncio
 import os
 from urllib.parse import urlsplit
 from uuid import uuid4
-from unittest.mock import AsyncMock
-
 import pytest
 
 from app.core.config import settings
 from app.models.enums import PaymentStatus, PaymentType, RegistrationStatus
 from app.models.payment import Payment
 from app.payments.apply import apply_payment_success
-from app.services import email_triggers, notification_service
+from app.services import email_service, notification_service
 
 from tests.conftest import _make_event, _make_solo_registration, _make_user_profile, requires_db
 
-pytestmark = requires_db
+pytestmark = [
+    requires_db,
+    pytest.mark.skipif(
+        os.getenv("RUN_MAILJET_INTEGRATION") != "1",
+        reason="Set RUN_MAILJET_INTEGRATION=1 to run real Mailjet integration tests",
+    ),
+]
 
 
 @pytest.mark.asyncio
@@ -30,26 +35,32 @@ async def test_real_mailjet_after_payment(db, monkeypatch):
         if not value
     ]
     if missing:
-        pytest.fail("Missing required Mailjet integration variables: " + ", ".join(missing))
+        pytest.skip("Missing required Mailjet integration variables: " + ", ".join(missing))
 
     database_name = urlsplit(settings.async_database_url).path.lstrip("/")
     if database_name != "kratos_test":
-        pytest.fail(
+        pytest.skip(
             f"Refusing to run against database {database_name!r}; expected dedicated database 'kratos_test'"
         )
 
-    smtp_notification = AsyncMock()
-    monkeypatch.setattr(notification_service, "notify_payment_confirmed", smtp_notification)
+    delivery_tasks: list[asyncio.Task] = []
+
+    def capture_task(coro):
+        task = asyncio.create_task(coro)
+        delivery_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(notification_service.asyncio, "create_task", capture_task)
 
     mailjet_result = {}
-    real_send_email = email_triggers.send_email
+    real_send_email = email_service.send_email
 
     async def capture_mailjet_result(**kwargs):
         result = await real_send_email(**kwargs)
         mailjet_result["result"] = result
         return result
 
-    monkeypatch.setattr(email_triggers, "send_email", capture_mailjet_result)
+    monkeypatch.setattr(email_service, "send_email", capture_mailjet_result)
 
     profile = await _make_user_profile(db, email=recipient)
     event = await _make_event(db, name=f"Mailjet Post-Payment Test {uuid4().hex[:8]}")
@@ -73,10 +84,12 @@ async def test_real_mailjet_after_payment(db, monkeypatch):
         f"local-mailjet-payment-{uuid4().hex}",
     )
 
+    if delivery_tasks:
+        await asyncio.gather(*delivery_tasks)
+
     assert result.applied is True
     await db.refresh(payment)
     await db.refresh(registration)
     assert payment.status == PaymentStatus.PAID
     assert registration.status == RegistrationStatus.CONFIRMED
     assert mailjet_result.get("result") == (True, None)
-    smtp_notification.assert_awaited_once_with(db, payment.id)
