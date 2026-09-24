@@ -27,6 +27,14 @@ class ScanOutcome:
     result: AttendanceScanResult
 
 
+@dataclass
+class _QrParticipant:
+    profile_id: Optional[UUID]
+    event_id: UUID
+    team_id: Optional[UUID]
+    team_member_id: Optional[UUID]
+
+
 async def get_checkpoint_or_404(db: AsyncSession, checkpoint_id: UUID) -> AttendanceCheckpoint:
     result = await db.execute(select(AttendanceCheckpoint).where(AttendanceCheckpoint.id == checkpoint_id))
     checkpoint = result.scalar_one_or_none()
@@ -35,48 +43,51 @@ async def get_checkpoint_or_404(db: AsyncSession, checkpoint_id: UUID) -> Attend
     return checkpoint
 
 
-async def _resolve_qr_context(
-    db: AsyncSession, qr: QRCode
-) -> tuple[Optional[UUID], Optional[UUID], Optional[UUID]]:
-    """Returns (profile_id, event_id, team_id)."""
+async def _resolve_qr_context(db: AsyncSession, qr: QRCode) -> Optional[_QrParticipant]:
+    """Resolve participant identity from a QR — TeamMember.id for team seats."""
     if qr.registration_id:
         reg_res = await db.execute(select(Registration).where(Registration.id == qr.registration_id))
         reg = reg_res.scalar_one_or_none()
         if not reg or not reg.profile_id:
-            return None, None, None
-        return reg.profile_id, reg.event_id, reg.team_id
+            return None
+        return _QrParticipant(
+            profile_id=reg.profile_id,
+            event_id=reg.event_id,
+            team_id=reg.team_id,
+            team_member_id=None,
+        )
 
     if qr.team_member_id:
         tm_res = await db.execute(select(TeamMember).where(TeamMember.id == qr.team_member_id))
         tm = tm_res.scalar_one_or_none()
         if not tm:
-            return None, None, None
-        return tm.profile_id, tm.event_id, tm.team_id
+            return None
+        return _QrParticipant(
+            profile_id=tm.profile_id,
+            event_id=tm.event_id,
+            team_id=tm.team_id,
+            team_member_id=tm.id,
+        )
 
-    return None, None, None
+    return None
 
 
-async def _is_paid_eligible(
-    db: AsyncSession,
-    qr: QRCode,
-    profile_id: UUID,
-    event_id: UUID,
-) -> bool:
+async def _is_paid_eligible(db: AsyncSession, qr: QRCode, participant: _QrParticipant) -> bool:
     if qr.registration_id:
         reg_res = await db.execute(select(Registration).where(Registration.id == qr.registration_id))
         reg = reg_res.scalar_one_or_none()
         return reg is not None and reg.status == RegistrationStatus.CONFIRMED
 
-    if qr.team_member_id:
-        tm_res = await db.execute(select(TeamMember).where(TeamMember.id == qr.team_member_id))
+    if qr.team_member_id and participant.team_member_id:
+        tm_res = await db.execute(select(TeamMember).where(TeamMember.id == participant.team_member_id))
         tm = tm_res.scalar_one_or_none()
-        if not tm or tm.profile_id != profile_id or tm.status != TeamMemberStatus.ACTIVE:
+        if not tm or tm.status != TeamMemberStatus.ACTIVE:
             return False
         team_res = await db.execute(select(Team).where(Team.id == tm.team_id))
         team = team_res.scalar_one_or_none()
         return (
             team is not None
-            and team.event_id == event_id
+            and team.event_id == participant.event_id
             and team.status in (TeamStatus.PAID, TeamStatus.COMPLETE)
         )
 
@@ -84,8 +95,31 @@ async def _is_paid_eligible(
 
 
 async def _prior_success_scan(
-    db: AsyncSession, checkpoint_id: UUID, profile_id: UUID
+    db: AsyncSession,
+    checkpoint_id: UUID,
+    *,
+    profile_id: Optional[UUID],
+    team_member_id: Optional[UUID],
 ) -> Optional[AttendanceScan]:
+    if team_member_id is not None:
+        result = await db.execute(
+            select(AttendanceScan)
+            .join(QRCode, AttendanceScan.qr_id == QRCode.id)
+            .where(
+                AttendanceScan.checkpoint_id == checkpoint_id,
+                QRCode.team_member_id == team_member_id,
+                AttendanceScan.result == AttendanceScanResult.SUCCESS,
+            )
+            .order_by(AttendanceScan.created_at.desc())
+            .limit(1)
+        )
+        prior = result.scalar_one_or_none()
+        if prior is not None:
+            return prior
+
+    if profile_id is None:
+        return None
+
     result = await db.execute(
         select(AttendanceScan)
         .where(
@@ -104,7 +138,8 @@ async def _insert_scan(
     *,
     checkpoint_id: UUID,
     qr_id: UUID,
-    profile_id: UUID,
+    profile_id: Optional[UUID],
+    team_member_id: Optional[UUID],
     result: AttendanceScanResult,
     scanned_by_admin_user_id: Optional[UUID] = None,
     note: Optional[str] = None,
@@ -113,6 +148,7 @@ async def _insert_scan(
         checkpoint_id=checkpoint_id,
         qr_id=qr_id,
         profile_id=profile_id,
+        team_member_id=team_member_id,
         result=result,
         scanned_by_admin_user_id=scanned_by_admin_user_id,
         note=note,
@@ -137,19 +173,24 @@ async def scan(
     if qr is None:
         return ScanOutcome(scan=None, result=AttendanceScanResult.INVALID)
 
-    profile_id, event_id, _team_id = await _resolve_qr_context(db, qr)
-    if profile_id is None or event_id is None:
+    participant = await _resolve_qr_context(db, qr)
+    if participant is None:
         return ScanOutcome(scan=None, result=AttendanceScanResult.INVALID)
+
+    scan_identity = {
+        "profile_id": participant.profile_id,
+        "team_member_id": participant.team_member_id,
+    }
 
     if not qr.is_active:
         scan_row = await _insert_scan(
             db,
             checkpoint_id=checkpoint_id,
             qr_id=qr.id,
-            profile_id=profile_id,
             result=AttendanceScanResult.INVALID,
             scanned_by_admin_user_id=admin_user_id,
             note=note or "inactive_qr",
+            **scan_identity,
         )
         return ScanOutcome(scan=scan_row, result=AttendanceScanResult.INVALID)
 
@@ -158,48 +199,53 @@ async def scan(
             db,
             checkpoint_id=checkpoint_id,
             qr_id=qr.id,
-            profile_id=profile_id,
             result=AttendanceScanResult.INVALID,
             scanned_by_admin_user_id=admin_user_id,
             note=note or "checkpoint_inactive",
+            **scan_identity,
         )
         return ScanOutcome(scan=scan_row, result=AttendanceScanResult.INVALID)
 
-    if event_id != checkpoint.event_id:
+    if participant.event_id != checkpoint.event_id:
         scan_row = await _insert_scan(
             db,
             checkpoint_id=checkpoint_id,
             qr_id=qr.id,
-            profile_id=profile_id,
             result=AttendanceScanResult.INVALID,
             scanned_by_admin_user_id=admin_user_id,
             note=note or "wrong_event",
+            **scan_identity,
         )
         return ScanOutcome(scan=scan_row, result=AttendanceScanResult.INVALID)
 
-    if not await _is_paid_eligible(db, qr, profile_id, event_id):
+    if not await _is_paid_eligible(db, qr, participant):
         scan_row = await _insert_scan(
             db,
             checkpoint_id=checkpoint_id,
             qr_id=qr.id,
-            profile_id=profile_id,
             result=AttendanceScanResult.NOT_PAID,
             scanned_by_admin_user_id=admin_user_id,
             note=note,
+            **scan_identity,
         )
         return ScanOutcome(scan=scan_row, result=AttendanceScanResult.NOT_PAID)
 
-    prior = await _prior_success_scan(db, checkpoint_id, profile_id)
+    prior = await _prior_success_scan(
+        db,
+        checkpoint_id,
+        profile_id=participant.profile_id,
+        team_member_id=participant.team_member_id,
+    )
     if prior is not None:
         if not checkpoint.allow_repeat_scan:
             scan_row = await _insert_scan(
                 db,
                 checkpoint_id=checkpoint_id,
                 qr_id=qr.id,
-                profile_id=profile_id,
                 result=AttendanceScanResult.DUPLICATE,
                 scanned_by_admin_user_id=admin_user_id,
                 note=note,
+                **scan_identity,
             )
             return ScanOutcome(scan=scan_row, result=AttendanceScanResult.DUPLICATE)
 
@@ -214,10 +260,10 @@ async def scan(
             db,
             checkpoint_id=checkpoint_id,
             qr_id=qr.id,
-            profile_id=profile_id,
             result=result,
             scanned_by_admin_user_id=admin_user_id,
             note=note or ("repeat_scan" if result == AttendanceScanResult.DUPLICATE else None),
+            **scan_identity,
         )
         return ScanOutcome(scan=scan_row, result=result)
 
@@ -225,10 +271,10 @@ async def scan(
         db,
         checkpoint_id=checkpoint_id,
         qr_id=qr.id,
-        profile_id=profile_id,
         result=AttendanceScanResult.SUCCESS,
         scanned_by_admin_user_id=admin_user_id,
         note=note,
+        **scan_identity,
     )
     return ScanOutcome(scan=scan_row, result=AttendanceScanResult.SUCCESS)
 

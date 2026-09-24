@@ -624,3 +624,58 @@ async def remove_member(
     invalidate_spots_cache(team.event_id)
     await db.refresh(member)
     return await _to_member_out(member)
+
+
+async def link_member_profile(
+    db: AsyncSession,
+    team_member_id: uuid.UUID,
+    profile: Profile,
+) -> TeamMember:
+    """
+    Attach a registered profile to an existing roster seat (e.g. leader-entered member
+    who later created an account). Preserves TeamMember.id and any existing QR history.
+    """
+    result = await db.execute(
+        select(TeamMember)
+        .options(selectinload(TeamMember.profile))
+        .where(TeamMember.id == team_member_id)
+        .with_for_update()
+    )
+    member = result.scalar_one_or_none()
+    if not member:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Team member not found")
+    if member.status in _TERMINAL:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cannot link a removed team member")
+
+    if member.profile_id is not None:
+        if member.profile_id == profile.id:
+            return member
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "This roster seat is already linked to another profile",
+        )
+
+    conflict = await db.execute(
+        select(TeamMember).where(
+            TeamMember.event_id == member.event_id,
+            TeamMember.profile_id == profile.id,
+            TeamMember.status.notin_(_TERMINAL),
+            TeamMember.id != member.id,
+        )
+    )
+    if conflict.scalar_one_or_none():
+        raise AppError(ALREADY_REGISTERED, "That profile is already on a team for this event", status_code=409)
+
+    member.profile_id = profile.id
+    member.entry_source = TeamMemberEntrySource.LINKED_ACCOUNT
+    await db.flush()
+
+    team_result = await db.execute(select(Team).where(Team.id == member.team_id))
+    team = team_result.scalar_one_or_none()
+    if team and team.status in (TeamStatus.PAID, TeamStatus.COMPLETE):
+        await qr_service.generate_for_team_member(db, member.id)
+
+    await db.commit()
+    await db.refresh(member)
+    await db.refresh(member, attribute_names=["profile"])
+    return member

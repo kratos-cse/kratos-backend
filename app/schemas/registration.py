@@ -4,7 +4,8 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.models.enums import PaymentStatus, RegistrationStatus, TeamMemberRole, TeamMemberStatus, TeamStatus
+from app.models.enums import PaymentStatus, RegistrationStatus, TeamStatus
+from app.schemas.team import TeamMemberOut
 
 
 class RegistrationType(str, Enum):
@@ -21,16 +22,6 @@ class RegistrationCreateRequest(BaseModel):
         if self.registration_type == RegistrationType.TEAM and not self.team_name:
             raise ValueError("team_name is required when registration_type is TEAM")
         return self
-
-
-class TeamMemberOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: uuid.UUID
-    profile_id: uuid.UUID
-    role: TeamMemberRole
-    status: TeamMemberStatus
-    joined_at: datetime
 
 
 class TeamOut(BaseModel):

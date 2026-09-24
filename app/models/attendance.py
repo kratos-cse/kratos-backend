@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, String, Text, func
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Enum, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -34,14 +34,23 @@ class AttendanceScan(Base):
     """Immutable scan audit row — no updates in application code."""
 
     __tablename__ = "attendance_scans"
+    __table_args__ = (
+        CheckConstraint(
+            "profile_id IS NOT NULL OR team_member_id IS NOT NULL",
+            name="ck_attendance_scans_participant_identity",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     checkpoint_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("attendance_checkpoints.id"), nullable=False, index=True
     )
     qr_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("qr_codes.id"), nullable=False, index=True)
-    profile_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=False, index=True
+    profile_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=True, index=True
+    )
+    team_member_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("team_members.id"), nullable=True, index=True
     )
     result: Mapped[AttendanceScanResult] = mapped_column(
         Enum(AttendanceScanResult, name="attendance_scan_result"), nullable=False
