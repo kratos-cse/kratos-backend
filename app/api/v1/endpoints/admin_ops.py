@@ -6,7 +6,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.api.deps_admin import (
     get_current_active_admin,
@@ -50,12 +49,6 @@ from app.services.event_state import (
 )
 
 router = APIRouter(prefix="/admin", tags=["Admin Operations"])
-
-_REG_LOAD = (
-    selectinload(Registration.team).selectinload(Team.members),
-    selectinload(Registration.payment),
-)
-
 
 def _success(data):
     return {"status": "success", "data": data}
@@ -469,7 +462,11 @@ async def list_registrations(
     db: AsyncSession = Depends(get_db),
     _: AdminUser = Depends(require_permission("registration-read")),
 ):
-    q = select(Registration).options(*_REG_LOAD).order_by(Registration.created_at.desc())
+    q = (
+        select(Registration)
+        .options(*ops.ADMIN_REGISTRATION_LIST_LOAD)
+        .order_by(Registration.created_at.desc())
+    )
     if event_id:
         q = q.where(Registration.event_id == event_id)
     if reg_status:
@@ -477,20 +474,7 @@ async def list_registrations(
     q = q.offset(skip).limit(min(limit, 100))
     result = await db.execute(q)
     registrations = result.scalars().all()
-    items = []
-    for r in registrations:
-        items.append(
-            {
-                "id": r.id,
-                "event_id": r.event_id,
-                "profile_id": r.profile_id,
-                "team_id": r.team_id,
-                "status": r.status,
-                "payment_id": r.payment_id,
-                "payment_status": r.payment.status if r.payment else None,
-                "created_at": r.created_at,
-            }
-        )
+    items = [ops.serialize_admin_registration(r) for r in registrations]
     return _success({"items": items, "skip": skip, "limit": limit})
 
 

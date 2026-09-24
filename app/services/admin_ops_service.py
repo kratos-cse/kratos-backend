@@ -24,7 +24,21 @@ from app.models.profile import Profile
 from app.models.registration import Registration
 from app.models.team import Team, TeamMember
 from app.services import qr_service
-from app.services.roster_service import apply_roster_to_rules, sync_legacy_team_sizes
+from app.services.roster_service import (
+    apply_roster_to_rules,
+    count_mandatory,
+    count_substitutes,
+    roster_limits,
+    sync_legacy_team_sizes,
+)
+
+_ACTIVE_MEMBER_STATUSES = (TeamMemberStatus.ACTIVE, TeamMemberStatus.PENDING_PAYMENT)
+
+ADMIN_REGISTRATION_LIST_LOAD = (
+    selectinload(Registration.team).selectinload(Team.members),
+    selectinload(Registration.payment),
+    selectinload(Registration.event).selectinload(Event.rules),
+)
 
 
 def apply_registration_mode_to_rules(rules: EventRegistrationRule, mode: RegistrationMode) -> None:
@@ -403,3 +417,75 @@ async def search_participant_profiles(
 
     result = await db.execute(base.order_by(Profile.full_name).offset(skip).limit(limit))
     return list(result.scalars().all()), int(total)
+
+
+def derive_registration_type(registration: Registration) -> str:
+    if registration.team_id is not None:
+        return "TEAM"
+    return "SOLO"
+
+
+def _active_team_members(team: Team) -> list[TeamMember]:
+    return [m for m in (team.members or []) if m.status in _ACTIVE_MEMBER_STATUSES]
+
+
+def serialize_admin_registration_payment(payment: Payment | None) -> dict[str, Any] | None:
+    if payment is None:
+        return None
+    return {
+        "id": payment.id,
+        "payer_profile_id": payment.payer_profile_id,
+        "payment_type": payment.payment_type,
+        "amount_paise": payment.amount_paise,
+        "currency": payment.currency,
+        "status": payment.status,
+        "razorpay_order_id": payment.razorpay_order_id,
+        "razorpay_payment_id": payment.razorpay_payment_id,
+        "created_at": payment.created_at,
+    }
+
+
+def serialize_admin_registration_team(
+    team: Team,
+    rules: EventRegistrationRule | None,
+) -> dict[str, Any]:
+    active = _active_team_members(team)
+    if rules is not None:
+        required, max_subs, total = roster_limits(rules)
+    else:
+        required, max_subs, total = 1, 0, 1
+    return {
+        "id": team.id,
+        "name": team.name,
+        "status": team.status,
+        "leader_profile_id": team.leader_profile_id,
+        "active_member_count": len(active),
+        "required_member_count": required,
+        "substitute_count": max_subs,
+        "team_max_size": total,
+        "mandatory_filled": count_mandatory(active),
+        "substitutes_filled": count_substitutes(active),
+    }
+
+
+def serialize_admin_registration(registration: Registration) -> dict[str, Any]:
+    registration_type = derive_registration_type(registration)
+    payment = registration.payment
+    rules = registration.event.rules if registration.event is not None else None
+    team_payload = None
+    if registration_type == "TEAM" and registration.team is not None:
+        team_payload = serialize_admin_registration_team(registration.team, rules)
+
+    return {
+        "id": registration.id,
+        "event_id": registration.event_id,
+        "profile_id": registration.profile_id,
+        "team_id": registration.team_id,
+        "registration_type": registration_type,
+        "status": registration.status,
+        "payment_id": registration.payment_id,
+        "payment_status": payment.status if payment is not None else None,
+        "payment": serialize_admin_registration_payment(payment),
+        "team": team_payload,
+        "created_at": registration.created_at,
+    }

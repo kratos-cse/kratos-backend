@@ -107,6 +107,47 @@ class AdminRegistrationUpdate(BaseModel):
     status: Optional[RegistrationStatus] = None
 
 
+class AdminRegistrationPaymentSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    payer_profile_id: uuid.UUID
+    payment_type: PaymentType
+    amount_paise: int
+    currency: str
+    status: PaymentStatus
+    razorpay_order_id: str
+    razorpay_payment_id: Optional[str] = None
+    created_at: datetime
+
+
+class AdminRegistrationTeamSummary(BaseModel):
+    id: uuid.UUID
+    name: str
+    status: TeamStatus
+    leader_profile_id: uuid.UUID
+    active_member_count: int
+    required_member_count: int
+    substitute_count: int
+    team_max_size: int
+    mandatory_filled: int
+    substitutes_filled: int
+
+
+class AdminRegistrationListItem(BaseModel):
+    id: uuid.UUID
+    event_id: uuid.UUID
+    profile_id: Optional[uuid.UUID] = None
+    team_id: Optional[uuid.UUID] = None
+    registration_type: str
+    status: RegistrationStatus
+    payment_id: Optional[uuid.UUID] = None
+    payment_status: Optional[PaymentStatus] = None
+    payment: Optional[AdminRegistrationPaymentSummary] = None
+    team: Optional[AdminRegistrationTeamSummary] = None
+    created_at: datetime
+
+
 class PaymentListItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
