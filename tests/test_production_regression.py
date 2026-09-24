@@ -4,11 +4,9 @@ import uuid
 from datetime import datetime, timezone
 
 import pytest
-from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
-from app.api.v1.endpoints.payments import _link_registration_payment
 from app.api.v1.endpoints.profile import update_my_profile
 from app.core.security import _profile_cache, invalidate_user_cache
 from app.models.enums import (
@@ -21,7 +19,6 @@ from app.models.enums import (
     TeamMemberStatus,
 )
 from app.models.event import EventRegistrationRule
-from app.models.payment import Payment
 from app.models.registration import Registration
 from app.models.team import Team, TeamMember
 from app.schemas.profile import ProfileUpdateRequest
@@ -127,7 +124,11 @@ async def test_profile_update_with_cached_detached_profile(db):
 
 
 @pytest.mark.asyncio
-async def test_create_order_rejects_registration_with_existing_payment(db):
+async def test_create_order_reuses_active_created_payment(db):
+    from unittest.mock import MagicMock, patch
+
+    from app.payments.create_order import create_payment_order
+
     leader = await _make_user_profile(db, email=f"payer-{uuid.uuid4().hex}@reg.test")
     event = await _make_event(db, name=f"Pay Dup {uuid.uuid4().hex[:6]}", team=True)
     _team, registration = await _make_team_registration(db, event=event, leader=leader)
@@ -137,28 +138,22 @@ async def test_create_order_rejects_registration_with_existing_payment(db):
         payment_type=PaymentType.TEAM_REGISTRATION,
         registration=registration,
     )
-    new_payment = Payment(
-        payer_profile_id=leader.id,
-        payment_type=PaymentType.TEAM_REGISTRATION,
-        razorpay_order_id=f"order_{uuid.uuid4().hex}",
-        amount_paise=25000,
-        currency="INR",
-        status=PaymentStatus.CREATED,
-    )
-    db.add(new_payment)
-    await db.flush()
 
-    with pytest.raises(HTTPException) as exc:
-        await _link_registration_payment(
+    async def _noop_sync(_db, payment):
+        return payment
+
+    with patch("app.payments.create_order.get_razorpay") as mock_rp:
+        mock_rp.return_value.order.create = MagicMock()
+        result = await create_payment_order(
             db,
-            payment=new_payment,
             event_id=event.id,
-            payer=leader,
             payment_type=PaymentType.TEAM_REGISTRATION,
+            payer=leader,
             registration_id=registration.id,
+            sync_payment=_noop_sync,
         )
-    assert exc.value.status_code == 400
-    assert "already has a payment" in exc.value.detail.lower()
+
+    assert result["paymentId"] == str(existing.id)
     assert registration.payment_id == existing.id
 
 

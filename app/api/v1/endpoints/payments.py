@@ -1,7 +1,6 @@
 """Payment HTTP routes — async SQLAlchemy + Authentication JWT deps."""
 import json
 import logging
-import uuid
 from typing import Literal, Optional
 from uuid import UUID
 
@@ -18,13 +17,10 @@ from app.core.security import get_current_profile
 from app.db.session import get_db
 from app.models.admin import AdminUser
 from app.models.enums import PaymentStatus, PaymentType
-from app.models.event import EventRegistrationRule
 from app.models.payment import Payment
 from app.models.profile import Profile
-from app.models.registration import Registration
-from app.models.team import Team
-from app.payments.amounts import compute_amount_paise
 from app.payments.apply import apply_payment_failure, apply_payment_success
+from app.payments.create_order import create_payment_order
 from app.payments.razorpay_client import get_razorpay, with_retry_async
 from app.payments.admin_delete import admin_delete_payment
 from app.payments.refund import RefundError, refund_payment
@@ -52,128 +48,20 @@ class RefundBody(BaseModel):
     reason: str
 
 
-async def _link_registration_payment(
-    db: AsyncSession,
-    *,
-    payment: Payment,
-    event_id: UUID,
-    payer: Profile,
-    payment_type: PaymentType,
-    registration_id: Optional[UUID],
-) -> None:
-    if registration_id:
-        result = await db.execute(select(Registration).where(Registration.id == registration_id))
-        registration = result.scalar_one_or_none()
-        if not registration:
-            raise HTTPException(status_code=404, detail="Registration not found")
-        if registration.event_id != event_id:
-            raise HTTPException(status_code=400, detail="Registration does not belong to this event")
-        if registration.payment_id is not None:
-            raise HTTPException(
-                status_code=400,
-                detail="Registration already has a payment attached",
-            )
-        if payment_type == PaymentType.TEAM_REGISTRATION and not registration.team_id:
-            raise HTTPException(status_code=400, detail="Registration is not a team registration")
-        if payment_type == PaymentType.SOLO_REGISTRATION and not registration.profile_id:
-            raise HTTPException(status_code=400, detail="Registration is not a solo registration")
-    elif payment_type == PaymentType.SOLO_REGISTRATION:
-        result = await db.execute(
-            select(Registration).where(
-                Registration.event_id == event_id,
-                Registration.profile_id == payer.id,
-                Registration.payment_id.is_(None),
-            )
-        )
-        registration = result.scalar_one_or_none()
-        if not registration:
-            raise HTTPException(status_code=404, detail="No pending solo registration for this event")
-    else:  # TEAM_REGISTRATION
-        team_result = await db.execute(
-            select(Team).where(Team.event_id == event_id, Team.leader_profile_id == payer.id)
-        )
-        team = team_result.scalar_one_or_none()
-        if not team:
-            raise HTTPException(status_code=404, detail="No team found for payer on this event")
-        result = await db.execute(
-            select(Registration).where(
-                Registration.team_id == team.id,
-                Registration.payment_id.is_(None),
-            )
-        )
-        registration = result.scalar_one_or_none()
-        if not registration:
-            raise HTTPException(status_code=404, detail="No pending team registration for this event")
-
-    registration.payment_id = payment.id
-
-
 @router.post("/payments/create-order")
 async def create_order(
     body: CreateOrderBody,
     db: AsyncSession = Depends(get_db),
     payer: Profile = Depends(get_current_profile),
 ):
-    rules_result = await db.execute(
-        select(EventRegistrationRule).where(EventRegistrationRule.event_id == body.event_id)
-    )
-    rules = rules_result.scalar_one_or_none()
-    if not rules:
-        raise HTTPException(status_code=404, detail=f"No fee rules for event {body.event_id}")
-
-    payment_type = PaymentType(body.payment_type)
-
-    try:
-        amount_paise = await compute_amount_paise(db, body.event_id)
-    except ValueError as err:
-        raise HTTPException(status_code=400, detail=str(err))
-
-    receipt = f"kratos26_{uuid.uuid4().hex[:16]}"
-    order = await with_retry_async(
-        lambda: get_razorpay().order.create(
-            {
-                "amount": amount_paise,
-                "currency": "INR",
-                "receipt": receipt,
-                "notes": {
-                    "payment_type": body.payment_type,
-                    "event_id": str(body.event_id),
-                },
-            }
-        )
-    )
-
-    payment = Payment(
-        payer_profile_id=payer.id,
-        payment_type=payment_type,
-        team_member_id=None,
-        razorpay_order_id=order["id"],
-        amount_paise=amount_paise,
-        currency="INR",
-        status=PaymentStatus.CREATED,
-    )
-    db.add(payment)
-    await db.flush()
-
-    await _link_registration_payment(
+    return await create_payment_order(
         db,
-        payment=payment,
         event_id=body.event_id,
+        payment_type=PaymentType(body.payment_type),
         payer=payer,
-        payment_type=payment_type,
         registration_id=body.registration_id,
+        sync_payment=_sync_payment_if_needed,
     )
-
-    await db.commit()
-    await db.refresh(payment)
-
-    return {
-        "paymentId": str(payment.id),
-        "razorpayOrderId": payment.razorpay_order_id,
-        "amountPaise": payment.amount_paise,
-        "currency": payment.currency,
-        "razorpayKeyId": settings.RAZORPAY_KEY_ID,
-    }
 
 
 @router.post("/payments/verify")
