@@ -119,10 +119,12 @@ async def _purge_team_graph(db: AsyncSession, team_id: uuid.UUID, registration: 
 
     await db.execute(delete(TeamInvitation).where(TeamInvitation.team_id == team_id))
     await db.execute(delete(TeamMember).where(TeamMember.team_id == team_id))
-    await db.execute(delete(Team).where(Team.id == team_id))
 
+    # Registration.team_id FK must be cleared before teams row is removed.
     if registration:
         await db.execute(delete(Registration).where(Registration.id == registration.id))
+
+    await db.execute(delete(Team).where(Team.id == team_id))
 
 
 async def _delete_registration_tree(db: AsyncSession, registration: Registration) -> None:
