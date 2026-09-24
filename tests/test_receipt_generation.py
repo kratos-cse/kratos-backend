@@ -88,13 +88,15 @@ def test_render_html_receipt_solo():
     }
     rendered = render_html_receipt(ctx)
     assert "<!DOCTYPE html>" in rendered
-    assert "KRATOS" in rendered
+    assert "Registration Confirmed" in rendered
+    assert "REGISTRATION RECEIPT" in rendered
     assert "KR-20260922-A1B2" in rendered
     assert "Ada Lovelace" in rendered
-    assert "ada@example.com" in rendered
     assert "Algorithmic Code Sprint" in rendered
     assert "₹250.00" in rendered
     assert "pay_test_888" in rendered
+    assert "Events registered" in rendered
+    assert "cloudinary.com" in rendered
     assert "<svg" in rendered
     assert "window.print()" in rendered
 
@@ -134,3 +136,5 @@ def test_render_html_receipt_team():
     assert "Alan Turing" in rendered
     assert "LEADER" in rendered
     assert "₹1000.00" in rendered
+    assert "Team roster" in rendered
+    assert "Total amount" in rendered

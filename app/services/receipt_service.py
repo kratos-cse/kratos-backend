@@ -18,7 +18,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.branding.documents import render_document_header_html
+from app.branding.documents import BRAND_IMAGE_URLS
 from app.core.config import settings
 
 logger = logging.getLogger("receipt_service")
@@ -38,6 +38,22 @@ def _receipt_number() -> str:
     date_part = datetime.now(timezone.utc).strftime("%Y%m%d")
     suffix = secrets.token_hex(4).upper()
     return f"KR-{date_part}-{suffix}"
+
+
+def generate_qr_png_bytes(data: str) -> bytes:
+    """PNG bytes for email inline embedding (SVG is poorly supported in mail clients)."""
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=6,
+        border=2,
+    )
+    qr.add_data(data)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    stream = io.BytesIO()
+    img.save(stream, format="PNG")
+    return stream.getvalue()
 
 
 def generate_qr_svg(data: str) -> str:
@@ -77,52 +93,106 @@ def receipt_pdf_url(payment_id: uuid.UUID, receipt_token: str | None = None) -> 
     return url
 
 
+def _receipt_participant_count(ctx: dict[str, Any]) -> int:
+    members = ctx.get("team_members") or []
+    return len(members) if members else 1
+
+
+def _default_venue(ctx: dict[str, Any]) -> str:
+    venue = (ctx.get("event_venue") or "").strip()
+    if venue:
+        return venue
+    return "Easwari Engineering College, Chennai, Tamil Nadu"
+
+
 def render_pdf_receipt(ctx: dict[str, Any]) -> bytes:
-    """Render a branded PDF receipt in memory (never written to disk)."""
+    """Render a KRATOS'26 registration receipt card as PDF (in memory only)."""
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=letter)
     width, height = letter
-    y = height - 56
+    margin = 54
+    card_w = width - margin * 2
+    y = height - margin
 
     c.setFillColorRGB(0.06, 0.09, 0.16)
-    c.rect(0, height - 88, width, 88, fill=1, stroke=0)
-    c.setFillColorRGB(0.98, 0.98, 0.99)
-    c.setFont("Helvetica-Bold", 22)
-    c.drawString(72, height - 52, "KRATOS'26")
+    c.setFont("Helvetica-Bold", 20)
+    c.drawCentredString(width / 2, y, "Registration Confirmed!")
+    y -= 22
     c.setFont("Helvetica", 10)
-    c.drawString(72, height - 68, "EEC · ACE · CSE")
+    c.setFillColorRGB(0.71, 0.76, 0.84)
+    c.drawCentredString(width / 2, y, "Your registration for KRATOS'26 has been successfully processed")
+    y -= 28
+
+    card_top = y
+    card_h = 420
+    c.setFillColorRGB(1, 1, 1)
+    c.roundRect(margin, card_top - card_h, card_w, card_h, 10, fill=1, stroke=0)
+
+    ty = card_top - 28
+    c.setFillColorRGB(0.06, 0.09, 0.16)
+    c.setFont("Helvetica-Bold", 16)
+    c.drawCentredString(width / 2, ty, "KRATOS'26")
+    ty -= 14
+    c.setFont("Helvetica", 9)
+    c.setFillColorRGB(0.45, 0.5, 0.58)
+    c.drawCentredString(width / 2, ty, "Technical Symposium")
+    ty -= 16
+    c.setFont("Helvetica-Bold", 10)
+    c.drawCentredString(width / 2, ty, "REGISTRATION RECEIPT")
+
+    ty -= 22
+    c.setFillColorRGB(0.73, 0.11, 0.11)
+    c.rect(margin + 12, ty - 34, card_w - 24, 34, fill=1, stroke=0)
+    c.setFillColorRGB(1, 1, 1)
+    c.setFont("Helvetica-Bold", 8)
+    c.drawCentredString(width / 2, ty - 12, "VENUE")
+    c.setFont("Helvetica-Bold", 10)
+    c.drawCentredString(width / 2, ty - 26, _default_venue(ctx)[:60])
+
+    ty -= 52
     c.setFillColorRGB(0.1, 0.1, 0.12)
-
-    y = height - 120
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(72, y, "Payment Confirmed")
-    y -= 24
-    c.setFont("Helvetica", 11)
-    for label, value in [
+    c.setFont("Helvetica", 10)
+    details = [
+        ("Payment ID", ctx.get("razorpay_payment_id") or str(ctx.get("payment_id", ""))[:20]),
+        ("Registration Date", ctx["issued_at_formatted"]),
+        ("Status", "Confirmed"),
         ("Receipt", ctx["receipt_number"]),
-        ("Issued", ctx["issued_at_formatted"]),
-        ("Event", ctx["event_name"]),
-        ("Participant", ctx["payer_name"]),
-        ("Amount", f"₹{ctx['amount_inr']} {ctx['currency']}"),
-        ("Payment ID", ctx["payment_id"][:18] + "..."),
-    ]:
-        c.drawString(72, y, f"{label}: {value}")
-        y -= 16
+    ]
+    for label, value in details:
+        c.drawString(margin + 24, ty, f"{label}:")
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(margin + 140, ty, str(value)[:48])
+        c.setFont("Helvetica", 10)
+        ty -= 16
 
-    if ctx.get("team_name"):
-        c.drawString(72, y, f"Team: {ctx['team_name']}")
-        y -= 16
+    ty -= 6
+    c.setFont("Helvetica-Bold", 9)
+    c.drawString(margin + 24, ty, "EVENTS REGISTERED")
+    ty -= 14
+    team_label = ctx.get("team_name") or "Individual"
+    count = _receipt_participant_count(ctx)
+    c.setFont("Helvetica", 9)
+    c.drawString(margin + 24, ty, f"{ctx['event_name'][:40]}  |  Team: {team_label[:20]}  |  {count} participant(s)")
+    ty -= 14
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(margin + 24, ty, f"TOTAL AMOUNT: ₹{ctx['amount_inr']} {ctx['currency']}")
 
     qr_png = io.BytesIO()
     qr_img = qrcode.make(ctx["qr_verify_url"])
     qr_img.save(qr_png, format="PNG")
     qr_png.seek(0)
-    c.drawImage(ImageReader(qr_png), width - 160, 96, width=96, height=96, mask="auto")
-    c.setFont("Helvetica", 9)
-    c.drawString(width - 160, 84, "Event Pass QR")
+    c.drawImage(ImageReader(qr_png), width - margin - 100, card_top - card_h + 24, width=88, height=88, mask="auto")
+    c.setFont("Helvetica", 8)
+    c.drawString(width - margin - 100, card_top - card_h + 12, "Entry QR (payer pass)")
 
-    c.setFont("Helvetica", 9)
-    c.drawString(72, 72, "KRATOS'26 Organizing Committee · kratos.cse@gmail.com")
+    c.setFont("Helvetica", 8)
+    c.setFillColorRGB(0.45, 0.5, 0.58)
+    c.drawCentredString(
+        width / 2,
+        card_top - card_h + 16,
+        "Thank you for registering for KRATOS'26 · kratos.cse@gmail.com",
+    )
+
     c.showPage()
     c.save()
     return buffer.getvalue()
@@ -312,541 +382,211 @@ async def get_receipt_data_context(db: AsyncSession, payment_id: uuid.UUID) -> d
 
 
 def render_html_receipt(ctx: dict[str, Any]) -> str:
-    """Renders a modern, responsive, beautifully styled HTML receipt with embedded QR code."""
-    team_members_html = ""
-    if ctx["team_members"]:
-        rows = "".join(
-            f"""
-            <tr style="border-bottom: 1px solid #f1f5f9;">
-                <td style="padding: 8px 12px; color: #1e293b; font-weight: 500;">{html.escape(m['name'])}</td>
-                <td style="padding: 8px 12px; color: #64748b; font-size: 13px;">{html.escape(m['role'])}</td>
-                <td style="padding: 8px 12px; text-align: right;">
-                    <span style="background: #ecfdf5; color: #059669; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 9999px;">
-                        {html.escape(m['status'])}
-                    </span>
-                </td>
-            </tr>
-            """
-            for m in ctx["team_members"]
-        )
-        team_members_html = f"""
-        <div style="margin-top: 20px;">
-            <h4 style="margin: 0 0 10px 0; font-size: 13px; font-weight: 600; color: #475569; text-transform: uppercase; letter-spacing: 0.05em;">
-                Team Roster ({html.escape(ctx['team_name'] or 'Team')})
-            </h4>
-            <table style="width: 100%; border-collapse: collapse; background: #f8fafc; border-radius: 8px; overflow: hidden; border: 1px solid #e2e8f0; font-size: 13px;">
-                <thead>
-                    <tr style="background: #f1f5f9; color: #475569; text-align: left; font-size: 11px; text-transform: uppercase;">
-                        <th style="padding: 8px 12px;">Member</th>
-                        <th style="padding: 8px 12px;">Role</th>
-                        <th style="padding: 8px 12px; text-align: right;">Status</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {rows}
-                </tbody>
-            </table>
-        </div>
-        """
+    """KRATOS'26 registration receipt card — hierarchy aligned with legacy Kratos receipt."""
+    urls = BRAND_IMAGE_URLS
+    venue = html.escape(_default_venue(ctx))
+    participant_count = _receipt_participant_count(ctx)
+    team_label = html.escape(ctx.get("team_name") or "Individual")
+    reg_type = html.escape(ctx["payment_type"].replace("_", " "))
+    generated_at = datetime.now(timezone.utc).strftime("%d %b %Y, %I:%M %p UTC")
 
-    whatsapp_btn_html = ""
+    roster_rows = ""
+    for member in ctx.get("team_members") or []:
+        roster_rows += (
+            "<tr>"
+            f'<td style="padding:10px 12px;border-bottom:1px solid #f1f5f9;">{html.escape(member["name"])}</td>'
+            f'<td style="padding:10px 12px;border-bottom:1px solid #f1f5f9;color:#64748b;">{html.escape(member["role"])}</td>'
+            f'<td style="padding:10px 12px;border-bottom:1px solid #f1f5f9;text-align:right;">'
+            f'<span style="background:#ecfdf5;color:#059669;font-size:11px;font-weight:600;padding:2px 8px;border-radius:9999px;">'
+            f'{html.escape(member["status"])}</span></td></tr>'
+        )
+    roster_block = ""
+    if roster_rows:
+        roster_block = f"""
+        <div style="margin-top:20px;">
+          <p style="margin:0 0 8px;font-size:11px;font-weight:700;letter-spacing:0.1em;color:#64748b;text-transform:uppercase;">
+            Team roster</p>
+          <table style="width:100%;border-collapse:collapse;font-size:13px;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;">
+            <thead><tr style="background:#f8fafc;color:#475569;font-size:11px;text-transform:uppercase;">
+              <th style="padding:8px 12px;text-align:left;">Member</th>
+              <th style="padding:8px 12px;text-align:left;">Role</th>
+              <th style="padding:8px 12px;text-align:right;">Status</th>
+            </tr></thead>
+            <tbody>{roster_rows}</tbody>
+          </table>
+        </div>"""
+
+    whatsapp_btn = ""
     if ctx.get("whatsapp_link"):
-        whatsapp_btn_html = f"""
-        <div style="margin-top: 16px; text-align: center;">
-            <a href="{html.escape(ctx['whatsapp_link'])}" target="_blank" rel="noopener" style="display: inline-flex; align-items: center; gap: 8px; background: #25D366; color: #ffffff; text-decoration: none; padding: 10px 18px; border-radius: 8px; font-size: 13px; font-weight: 600;">
-                <svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24"><path d="M12.031 6.172c-3.181 0-5.767 2.586-5.768 5.766-.001 1.298.38 2.27 1.019 3.287l-.711 2.598 2.664-.699c.971.53 1.954.814 2.796.814 3.18 0 5.767-2.587 5.768-5.766.001-3.181-2.586-5.77-5.768-5.77zm0 10.378c-.767 0-1.611-.225-2.273-.62l-.162-.097-1.579.414.421-1.54-.106-.169c-.435-.694-.666-1.428-.665-2.599.001-2.54 2.068-4.606 4.609-4.606 2.542 0 4.608 2.067 4.608 4.607 0 2.541-2.066 4.61-4.608 4.61z"/></svg>
-                Join Official WhatsApp Group
-            </a>
-        </div>
-        """
+        whatsapp_btn = (
+            f'<p style="margin:16px 0 0;text-align:center;">'
+            f'<a href="{html.escape(ctx["whatsapp_link"])}" style="display:inline-block;background:#25D366;color:#fff;'
+            f'text-decoration:none;padding:10px 18px;border-radius:8px;font-size:13px;font-weight:600;">'
+            f"Join event WhatsApp group</a></p>"
+        )
 
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>KRATOS'26 Receipt - {html.escape(ctx['receipt_number'])}</title>
-    <style>
-        * {{
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }}
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-            background-color: #0f172a;
-            color: #1e293b;
-            padding: 40px 16px;
-            display: flex;
-            justify-content: center;
-            align-items: flex-start;
-            min-height: 100vh;
-        }}
-        .receipt-container {{
-            width: 100%;
-            max-width: 820px;
-            background: #ffffff;
-            border-radius: 16px;
-            overflow: hidden;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.35);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-        }}
-        .action-bar {{
-            background: #1e293b;
-            padding: 12px 24px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            border-bottom: 1px solid #334155;
-        }}
-        .btn {{
-            cursor: pointer;
-            border: none;
-            padding: 8px 16px;
-            font-size: 13px;
-            font-weight: 600;
-            border-radius: 6px;
-            transition: all 0.2s ease;
-            text-decoration: none;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-        }}
-        .btn-primary {{
-            background: #6366f1;
-            color: #ffffff;
-        }}
-        .btn-primary:hover {{
-            background: #4f46e5;
-        }}
-        .btn-secondary {{
-            background: #334155;
-            color: #f8fafc;
-        }}
-        .btn-secondary:hover {{
-            background: #475569;
-        }}
-        .header {{
-            background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #312e81 100%);
-            padding: 32px 36px;
-            color: #ffffff;
-            position: relative;
-        }}
-        .header-top {{
-            display: flex;
-            justify-content: space-between;
-            align-items: flex-start;
-            margin-bottom: 20px;
-        }}
-        .logo-title {{
-            font-size: 28px;
-            font-weight: 800;
-            letter-spacing: -0.03em;
-            background: linear-gradient(135deg, #ffffff 0%, #a5b4fc 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }}
-        .sub-title {{
-            font-size: 12px;
-            color: #94a3b8;
-            letter-spacing: 0.05em;
-            text-transform: uppercase;
-            font-weight: 600;
-            margin-top: 4px;
-        }}
-        .badge-verified {{
-            background: rgba(16, 185, 129, 0.15);
-            border: 1px solid #10b981;
-            color: #34d399;
-            padding: 6px 14px;
-            border-radius: 9999px;
-            font-size: 12px;
-            font-weight: 700;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }}
-        .meta-grid {{
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-            gap: 16px;
-            border-top: 1px solid rgba(255, 255, 255, 0.1);
-            padding-top: 16px;
-        }}
-        .meta-item .label {{
-            font-size: 11px;
-            color: #94a3b8;
-            text-transform: uppercase;
-            font-weight: 600;
-            letter-spacing: 0.05em;
-        }}
-        .meta-item .value {{
-            font-size: 14px;
-            color: #f8fafc;
-            font-weight: 600;
-            margin-top: 2px;
-        }}
-        .content-body {{
-            padding: 32px 36px;
-        }}
-        .ticket-strip {{
-            background: #f8fafc;
-            border: 1px solid #e2e8f0;
-            border-left: 4px solid #6366f1;
-            padding: 18px 20px;
-            border-radius: 8px;
-            margin-bottom: 28px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 12px;
-        }}
-        .event-heading {{
-            font-size: 20px;
-            font-weight: 700;
-            color: #0f172a;
-        }}
-        .event-meta {{
-            font-size: 13px;
-            color: #64748b;
-            margin-top: 4px;
-            display: flex;
-            gap: 16px;
-            flex-wrap: wrap;
-        }}
-        .pass-type-badge {{
-            background: #e0e7ff;
-            color: #4338ca;
-            padding: 4px 10px;
-            border-radius: 6px;
-            font-size: 12px;
-            font-weight: 700;
-        }}
-        .grid-2col {{
-            display: grid;
-            grid-template-columns: 1.3fr 1fr;
-            gap: 28px;
-            margin-bottom: 28px;
-        }}
-        @media (max-width: 680px) {{
-            .grid-2col {{
-                grid-template-columns: 1fr;
-            }}
-        }}
-        .section-title {{
-            font-size: 12px;
-            font-weight: 700;
-            color: #64748b;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            margin-bottom: 12px;
-        }}
-        .info-card {{
-            background: #ffffff;
-            border: 1px solid #e2e8f0;
-            border-radius: 12px;
-            padding: 20px;
-        }}
-        .info-row {{
-            display: flex;
-            justify-content: space-between;
-            padding: 8px 0;
-            border-bottom: 1px dashed #f1f5f9;
-            font-size: 13px;
-        }}
-        .info-row:last-child {{
-            border-bottom: none;
-        }}
-        .info-row .k {{
-            color: #64748b;
-        }}
-        .info-row .v {{
-            color: #0f172a;
-            font-weight: 600;
-            text-align: right;
-        }}
-        .qr-card {{
-            background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
-            border: 2px dashed #cbd5e1;
-            border-radius: 12px;
-            padding: 20px;
-            text-align: center;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-        }}
-        .qr-svg-wrapper {{
-            width: 170px;
-            height: 170px;
-            background: #ffffff;
-            padding: 8px;
-            border-radius: 8px;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
-            border: 1px solid #e2e8f0;
-            margin-bottom: 12px;
-        }}
-        .qr-svg-wrapper svg {{
-            width: 100%;
-            height: 100%;
-        }}
-        .qr-token-text {{
-            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-            font-size: 11px;
-            color: #475569;
-            background: #e2e8f0;
-            padding: 4px 8px;
-            border-radius: 4px;
-            margin-bottom: 6px;
-            word-break: break-all;
-        }}
-        .qr-help {{
-            font-size: 11px;
-            color: #94a3b8;
-            line-height: 1.4;
-        }}
-        .table-payment {{
-            width: 100%;
-            border-collapse: collapse;
-            margin-top: 12px;
-            font-size: 13px;
-        }}
-        .table-payment th {{
-            background: #f8fafc;
-            color: #475569;
-            font-weight: 600;
-            padding: 10px 14px;
-            text-align: left;
-            border-bottom: 2px solid #e2e8f0;
-            font-size: 11px;
-            text-transform: uppercase;
-        }}
-        .table-payment td {{
-            padding: 12px 14px;
-            border-bottom: 1px solid #f1f5f9;
-        }}
-        .total-box {{
-            background: #f8fafc;
-            border-radius: 8px;
-            padding: 16px 20px;
-            margin-top: 20px;
-            border: 1px solid #e2e8f0;
-        }}
-        .total-row {{
-            display: flex;
-            justify-content: space-between;
-            font-size: 14px;
-            padding: 4px 0;
-            color: #475569;
-        }}
-        .total-grand {{
-            font-size: 20px;
-            font-weight: 800;
-            color: #0f172a;
-            border-top: 2px solid #e2e8f0;
-            padding-top: 10px;
-            margin-top: 8px;
-        }}
-        .footer {{
-            background: #f8fafc;
-            border-top: 1px solid #e2e8f0;
-            padding: 24px 36px;
-            text-align: center;
-            font-size: 12px;
-            color: #64748b;
-            line-height: 1.5;
-        }}
-        @media print {{
-            body {{
-                background: #ffffff;
-                padding: 0;
-            }}
-            .receipt-container {{
-                box-shadow: none;
-                border: none;
-                max-width: 100%;
-            }}
-            .action-bar {{
-                display: none !important;
-            }}
-            .header {{
-                background: #0f172a !important;
-                -webkit-print-color-adjust: exact;
-                print-color-adjust: exact;
-            }}
-            .badge-verified {{
-                border-color: #10b981 !important;
-                color: #059669 !important;
-            }}
-            .ticket-strip, .info-card, .total-box, .qr-card {{
-                -webkit-print-color-adjust: exact;
-                print-color-adjust: exact;
-            }}
-        }}
-    </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KRATOS'26 Receipt — {html.escape(ctx['receipt_number'])}</title>
+  <style>
+    body {{ margin:0; font-family:Segoe UI,Helvetica,Arial,sans-serif; background:#0f172a; color:#0f172a; }}
+    .wrap {{ max-width:680px; margin:0 auto; padding:32px 16px 48px; }}
+    .hero {{ text-align:center; color:#f8fafc; margin-bottom:28px; }}
+    .hero h1 {{ margin:0 0 8px; font-size:28px; font-weight:800; }}
+    .hero p {{ margin:0; color:#94a3b8; font-size:15px; }}
+    .card {{ background:#fff; border-radius:12px; overflow:hidden; box-shadow:0 25px 50px -12px rgba(0,0,0,.45); }}
+    .toolbar {{ background:#1e293b; padding:10px 16px; display:flex; justify-content:space-between; align-items:center; }}
+    .toolbar span {{ color:#94a3b8; font-size:12px; }}
+    .btn-print {{ cursor:pointer; border:none; background:#b91c1c; color:#fff; font-weight:600; font-size:13px; padding:8px 14px; border-radius:6px; }}
+    .brand {{ text-align:center; padding:28px 24px 20px; border-bottom:1px solid #e2e8f0; }}
+    .brand-logos {{ display:flex; align-items:center; justify-content:center; gap:12px; margin-bottom:12px; }}
+    .brand-logos img.lion {{ width:48px; height:48px; border-radius:8px; }}
+    .brand-logos img.wordmark {{ height:32px; width:auto; }}
+    .symposium {{ font-size:12px; color:#64748b; letter-spacing:.12em; text-transform:uppercase; margin-top:4px; }}
+    .receipt-label {{ margin-top:14px; font-size:11px; font-weight:700; letter-spacing:.18em; color:#b91c1c; }}
+    .venue {{ background:linear-gradient(135deg,#7f1d1d 0%,#b91c1c 50%,#991b1b 100%); color:#fff; text-align:center; padding:18px 20px; }}
+    .venue .tag {{ font-size:10px; letter-spacing:.2em; opacity:.85; margin-bottom:6px; }}
+    .venue .name {{ font-size:15px; font-weight:700; }}
+    .venue .sub {{ font-size:12px; opacity:.9; margin-top:4px; }}
+    .body {{ padding:24px 28px 28px; }}
+    .meta {{ display:grid; grid-template-columns:1fr 1fr; gap:12px 20px; margin-bottom:24px; }}
+    .meta .k {{ font-size:11px; color:#64748b; text-transform:uppercase; letter-spacing:.06em; }}
+    .meta .v {{ font-size:14px; font-weight:600; color:#0f172a; margin-top:2px; }}
+    .section-h {{ font-size:11px; font-weight:700; letter-spacing:.12em; color:#64748b; text-transform:uppercase; margin:0 0 10px; }}
+    .events-table {{ width:100%; border-collapse:collapse; font-size:13px; border:1px solid #e2e8f0; border-radius:8px; overflow:hidden; }}
+    .events-table th {{ background:#f8fafc; color:#475569; font-size:10px; text-transform:uppercase; letter-spacing:.06em; padding:10px 12px; text-align:left; }}
+    .events-table td {{ padding:12px; border-top:1px solid #f1f5f9; vertical-align:top; }}
+    .total {{ margin-top:20px; background:#0f172a; color:#f8fafc; border-radius:8px; padding:16px 20px; display:flex; justify-content:space-between; align-items:center; }}
+    .total span:first-child {{ font-size:12px; letter-spacing:.1em; text-transform:uppercase; opacity:.8; }}
+    .total span:last-child {{ font-size:22px; font-weight:800; }}
+    .pass-grid {{ display:grid; grid-template-columns:1fr 180px; gap:20px; margin-top:24px; align-items:start; }}
+    @media (max-width:600px) {{ .pass-grid {{ grid-template-columns:1fr; }} .meta {{ grid-template-columns:1fr; }} }}
+    .participant .row {{ display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px dashed #e2e8f0; font-size:13px; }}
+    .participant .row .k {{ color:#64748b; }}
+    .participant .row .v {{ font-weight:600; text-align:right; max-width:58%; }}
+    .qr-box {{ text-align:center; border:2px dashed #cbd5e1; border-radius:10px; padding:14px; background:#f8fafc; }}
+    .qr-box svg {{ width:140px; height:140px; }}
+    .qr-hint {{ font-size:11px; color:#64748b; margin-top:8px; line-height:1.4; }}
+    .card-footer {{ background:#f8fafc; border-top:1px solid #e2e8f0; padding:18px 24px; text-align:center; font-size:12px; color:#64748b; line-height:1.55; }}
+    .instructions {{ margin-top:24px; background:linear-gradient(135deg,#eff6ff 0%,#e0e7ff 100%); border:1px solid #bfdbfe; border-radius:12px; padding:20px 24px; }}
+    .instructions h3 {{ margin:0 0 12px; font-size:14px; color:#1e3a8a; }}
+    .instructions ul {{ margin:0; padding-left:18px; color:#334155; font-size:13px; line-height:1.65; }}
+    .partners {{ margin-top:16px; text-align:center; }}
+    .partners img {{ height:22px; margin:0 8px; opacity:.9; vertical-align:middle; }}
+    @media print {{
+      body {{ background:#fff; }}
+      .toolbar {{ display:none !important; }}
+      .card, .venue, .total {{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }}
+    }}
+  </style>
 </head>
 <body>
-    <div class="receipt-container">
-        <div class="action-bar">
-            <span style="color: #94a3b8; font-size: 12px; font-weight: 500;">
-                KRATOS'26 Official Digital Receipt
-            </span>
-            <div style="display: flex; gap: 10px;">
-                <button onclick="window.print()" class="btn btn-primary">
-                    <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M6 9V2h12v7M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2m-10 0v4h12v-4M8 14h.01"/></svg>
-                    Print / Save PDF
-                </button>
-            </div>
-        </div>
-
-        <div class="header">
-            <div class="header-top">
-                <div>
-                    {render_document_header_html()}
-                    <div class="sub-title">National Level Technical Symposium</div>
-                </div>
-                <div class="badge-verified">
-                    <svg width="14" height="14" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
-                    Payment Confirmed
-                </div>
-            </div>
-            <div class="meta-grid">
-                <div class="meta-item">
-                    <div class="label">Receipt Number</div>
-                    <div class="value">{html.escape(ctx['receipt_number'])}</div>
-                </div>
-                <div class="meta-item">
-                    <div class="label">Issued Date</div>
-                    <div class="value">{html.escape(ctx['issued_at_formatted'])}</div>
-                </div>
-                <div class="meta-item">
-                    <div class="label">Payment ID</div>
-                    <div class="value" style="font-family: monospace; font-size: 12px;">{html.escape(ctx['payment_id'][:12])}...</div>
-                </div>
-                <div class="meta-item">
-                    <div class="label">Amount Paid</div>
-                    <div class="value" style="color: #34d399; font-size: 16px;">₹{html.escape(ctx['amount_inr'])}</div>
-                </div>
-            </div>
-        </div>
-
-        <div class="content-body">
-            <div class="ticket-strip">
-                <div>
-                    <div class="event-heading">{html.escape(ctx['event_name'])}</div>
-                    <div class="event-meta">
-                        <span>🏷️ {html.escape(ctx['event_category'])}</span>
-                        <span>📍 {html.escape(ctx['event_venue'])}</span>
-                        <span>⏰ {html.escape(ctx['event_slot'])}</span>
-                    </div>
-                </div>
-                <div>
-                    <span class="pass-type-badge">
-                        {html.escape(ctx['payment_type'].replace('_', ' '))}
-                    </span>
-                </div>
-            </div>
-
-            <div class="grid-2col">
-                <div>
-                    <div class="section-title">Participant & Pass Details</div>
-                    <div class="info-card">
-                        <div class="info-row">
-                            <span class="k">Full Name</span>
-                            <span class="v">{html.escape(ctx['payer_name'])}</span>
-                        </div>
-                        <div class="info-row">
-                            <span class="k">Email Address</span>
-                            <span class="v">{html.escape(ctx['payer_email'])}</span>
-                        </div>
-                        <div class="info-row">
-                            <span class="k">Phone</span>
-                            <span class="v">{html.escape(ctx['payer_phone'])}</span>
-                        </div>
-                        <div class="info-row">
-                            <span class="k">College / Institute</span>
-                            <span class="v">{html.escape(ctx['payer_college'])}</span>
-                        </div>
-                        <div class="info-row">
-                            <span class="k">Payment Status</span>
-                            <span class="v" style="color: #059669;">{html.escape(ctx['status'])}</span>
-                        </div>
-                    </div>
-
-                    {team_members_html}
-                </div>
-
-                <div>
-                    <div class="section-title">Event Check-in QR Pass</div>
-                    <div class="qr-card">
-                        <div class="qr-svg-wrapper">
-                            {ctx['qr_svg']}
-                        </div>
-                        <div class="qr-token-text">{html.escape(ctx['qr_token'])}</div>
-                        <div class="qr-help">
-                            Present this QR pass at the entrance registration desk for instant scanning and check-in.
-                        </div>
-                    </div>
-                    {whatsapp_btn_html}
-                </div>
-            </div>
-
-            <div class="section-title">Payment Breakdown</div>
-            <div class="info-card" style="padding: 0; overflow: hidden;">
-                <table class="table-payment">
-                    <thead>
-                        <tr>
-                            <th>Item Description</th>
-                            <th>Gateway / Ref</th>
-                            <th style="text-align: right;">Amount</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <tr>
-                            <td>
-                                <strong>{html.escape(ctx['event_name'])}</strong>
-                                <div style="font-size: 11px; color: #64748b;">Registration Fee ({html.escape(ctx['payment_type'].replace('_', ' '))})</div>
-                            </td>
-                            <td style="font-family: monospace; font-size: 11px; color: #64748b;">
-                                Razorpay Ref: {html.escape(ctx['razorpay_payment_id'])}
-                            </td>
-                            <td style="text-align: right; font-weight: 600; color: #0f172a;">
-                                ₹{html.escape(ctx['amount_inr'])}
-                            </td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
-
-            <div class="total-box">
-                <div class="total-row">
-                    <span>Subtotal</span>
-                    <span>₹{html.escape(ctx['amount_inr'])}</span>
-                </div>
-                <div class="total-row">
-                    <span>Platform / Convenience Fee</span>
-                    <span>₹0.00</span>
-                </div>
-                <div class="total-row">
-                    <span>Taxes & GST (Included)</span>
-                    <span>₹0.00</span>
-                </div>
-                <div class="total-row total-grand">
-                    <span>Total Amount Paid</span>
-                    <span>₹{html.escape(ctx['amount_inr'])} {html.escape(ctx['currency'])}</span>
-                </div>
-            </div>
-        </div>
-
-        <div class="footer">
-            <p><strong>KRATOS &apos;26 Organizing Committee</strong> &bull; Dept. of Computer Science &amp; Engineering</p>
-            <p style="margin-top: 4px;">This is an authorized, computer-generated receipt &amp; event pass. Verified cryptographically.</p>
-            <p style="margin-top: 4px; font-size: 11px; color: #94a3b8;">For questions or assistance, contact support at <strong>kratos.cse@gmail.com</strong></p>
-        </div>
+  <div class="wrap">
+    <div class="hero">
+      <h1>Registration Confirmed!</h1>
+      <p>Your registration for KRATOS&apos;26 has been successfully processed</p>
     </div>
+
+    <div class="card">
+      <div class="toolbar">
+        <span>Official registration receipt · {html.escape(ctx['receipt_number'])}</span>
+        <button type="button" class="btn-print" onclick="window.print()">Print / Save PDF</button>
+      </div>
+
+      <div class="brand">
+        <div class="brand-logos">
+          <img class="lion" src="{html.escape(urls['lion_mark'], quote=True)}" alt="KRATOS lion mark" />
+          <img class="wordmark" src="{html.escape(urls['kratos26'], quote=True)}" alt="KRATOS'26" />
+        </div>
+        <div class="symposium">Technical Symposium</div>
+        <div class="receipt-label">REGISTRATION RECEIPT</div>
+      </div>
+
+      <div class="venue">
+        <div class="tag">VENUE</div>
+        <div class="name">{venue}</div>
+        <div class="sub">Easwari Engineering College · Chennai, Tamil Nadu</div>
+      </div>
+
+      <div class="body">
+        <div class="meta">
+          <div><div class="k">Payment ID</div><div class="v">{html.escape(ctx.get('razorpay_payment_id') or str(ctx.get('payment_id', '')))}</div></div>
+          <div><div class="k">Registration date</div><div class="v">{html.escape(ctx['issued_at_formatted'])}</div></div>
+          <div><div class="k">Receipt number</div><div class="v">{html.escape(ctx['receipt_number'])}</div></div>
+          <div><div class="k">Status</div><div class="v" style="color:#059669;">✅ Confirmed</div></div>
+        </div>
+
+        <p class="section-h">Events registered</p>
+        <table class="events-table">
+          <thead>
+            <tr>
+              <th>Event</th>
+              <th>Team</th>
+              <th>Participants</th>
+              <th style="text-align:right;">Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>{html.escape(ctx['event_name'])}</strong><br />
+                <span style="font-size:11px;color:#64748b;">{reg_type}</span></td>
+              <td>{team_label}</td>
+              <td>{participant_count}</td>
+              <td style="text-align:right;font-weight:700;">₹{html.escape(ctx['amount_inr'])}</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="total">
+          <span>Total amount</span>
+          <span>₹{html.escape(ctx['amount_inr'])} {html.escape(ctx['currency'])}</span>
+        </div>
+
+        <div class="pass-grid">
+          <div class="participant">
+            <p class="section-h">Registered by</p>
+            <div class="row"><span class="k">Name</span><span class="v">{html.escape(ctx['payer_name'])}</span></div>
+            <div class="row"><span class="k">Email</span><span class="v">{html.escape(ctx['payer_email'])}</span></div>
+            <div class="row"><span class="k">College</span><span class="v">{html.escape(ctx['payer_college'] or '—')}</span></div>
+            <div class="row"><span class="k">Order ref</span><span class="v">{html.escape(ctx['razorpay_order_id'])}</span></div>
+            {roster_block}
+          </div>
+          <div>
+            <p class="section-h">Entry QR pass</p>
+            <div class="qr-box">
+              {ctx['qr_svg']}
+              <p class="qr-hint">Present this QR at event check-in.<br />Each team member receives their own QR by email.</p>
+            </div>
+            {whatsapp_btn}
+          </div>
+        </div>
+      </div>
+
+      <div class="card-footer">
+        <p style="margin:0 0 6px;">🎉 Thank you for registering for KRATOS&apos;26! 🎉</p>
+        <p style="margin:0;font-size:11px;">Keep this receipt for your records · Generated {generated_at}</p>
+        <div class="partners">
+          <img src="{html.escape(urls['eec_white'], quote=True)}" alt="EEC" />
+          <img src="{html.escape(urls['ace_white'], quote=True)}" alt="ACE" />
+          <img src="{html.escape(urls['cse_logo'], quote=True)}" alt="CSE" />
+        </div>
+      </div>
+    </div>
+
+    <div class="instructions">
+      <h3>Important instructions</h3>
+      <ul>
+        <li>Save this receipt for event entry verification.</li>
+        <li>Check your email for your personal QR pass and event details.</li>
+        <li>Arrive at least 30 minutes before the event start time.</li>
+        <li>Bring a valid college ID for verification at the venue.</li>
+        <li>For support, contact <strong>kratos.cse@gmail.com</strong></li>
+      </ul>
+    </div>
+  </div>
 </body>
 </html>
 """

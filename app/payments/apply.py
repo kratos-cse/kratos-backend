@@ -178,15 +178,14 @@ async def _run_handoffs(db: AsyncSession, payment: PaymentRow) -> None:
         reg_result = await db.execute(select(Registration).where(Registration.payment_id == payment.id))
         registration = reg_result.scalar_one_or_none()
         if registration is not None and registration.team_id is not None:
-            leader_result = await db.execute(
+            members_result = await db.execute(
                 select(TeamMember).where(
                     TeamMember.team_id == registration.team_id,
-                    TeamMember.role == TeamMemberRole.LEADER,
+                    TeamMember.status == TeamMemberStatus.ACTIVE,
                 )
             )
-            leader = leader_result.scalar_one_or_none()
-            if leader is not None:
-                await trigger_qr(db, team_member_id=leader.id)
+            for member in members_result.scalars().all():
+                await trigger_qr(db, team_member_id=member.id)
 
     await issue_receipt(db, payment.id)
 
@@ -219,7 +218,7 @@ async def apply_payment_success(
     invalidate_spots_cache()
     invalidate_dashboard_cache()
 
-    await notification_service.notify_payment_confirmed(db, row.id)
+    await notification_service.notify_payment_confirmed(db, row.id)  # per-participant QR confirmation emails
     return ApplyResult(applied=True, payment=row)
 
 

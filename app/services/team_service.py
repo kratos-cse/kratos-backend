@@ -566,6 +566,12 @@ async def add_roster_member(
         except Exception:
             pass
 
+    if team.status in (TeamStatus.PAID, TeamStatus.COMPLETE) and member.profile_id:
+        try:
+            await notification_service.notify_member_confirmation(db, member.id)
+        except Exception:
+            pass
+
     return await _to_detail(db, team, rules)
 
 
