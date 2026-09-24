@@ -1,4 +1,4 @@
-"""Super-admin hard delete for non-finalized payment records."""
+"""Super-admin hard delete for payment records (including PAID/REFUNDED)."""
 import uuid
 
 from fastapi import HTTPException, status
@@ -6,7 +6,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.admin import AdminUser
-from app.models.enums import PaymentStatus
+from app.models.notification import Notification
 from app.models.payment import Payment
 from app.models.receipt import Receipt
 from app.models.registration import Registration
@@ -19,12 +19,7 @@ async def admin_delete_payment(db: AsyncSession, payment_id: uuid.UUID, admin: A
     if payment is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found")
 
-    if payment.status in (PaymentStatus.PAID, PaymentStatus.REFUNDED):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Paid or refunded payments cannot be permanently deleted",
-        )
-
+    await db.execute(delete(Notification).where(Notification.payment_id == payment_id))
     await db.execute(delete(Receipt).where(Receipt.payment_id == payment_id))
     await db.execute(update(Registration).where(Registration.payment_id == payment_id).values(payment_id=None))
     await db.execute(delete(Payment).where(Payment.id == payment_id))

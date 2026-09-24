@@ -490,5 +490,5 @@ async def admin_delete_payment_record(
     db: AsyncSession = Depends(get_db),
     admin: AdminUser = Depends(require_super_admin),
 ):
-    """Permanent delete — SUPER ADMIN only. Blocks PAID/REFUNDED records."""
+    """Permanent delete — SUPER ADMIN only. Includes PAID/REFUNDED records."""
     return await admin_delete_payment(db, payment_id, admin)
