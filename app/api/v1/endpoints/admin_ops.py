@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.api.deps_admin import (
     get_current_active_admin,
@@ -374,7 +375,7 @@ async def list_teams(
     db: AsyncSession = Depends(get_db),
     _: AdminUser = Depends(require_permission("team-read")),
 ):
-    q = select(Team).order_by(Team.created_at.desc())
+    q = select(Team).options(selectinload(Team.event)).order_by(Team.created_at.desc())
     if event_id:
         q = q.where(Team.event_id == event_id)
     if team_status:
@@ -387,6 +388,7 @@ async def list_teams(
             {
                 "id": t.id,
                 "event_id": t.event_id,
+                "event_name": t.event.name if t.event else None,
                 "name": t.name,
                 "leader_profile_id": t.leader_profile_id,
                 "status": t.status,
@@ -569,9 +571,17 @@ async def list_payments(
 @router.get("/exports/registrations")
 async def export_registrations(
     event_id: Optional[UUID] = Query(default=None),
+    format: str = Query(default="xlsx", pattern="^(xlsx|csv)$"),
     db: AsyncSession = Depends(get_db),
     _: AdminUser = Depends(require_permission("export")),
 ):
+    if format == "csv":
+        buf = await ops.export_registrations_csv(db, event_id=event_id)
+        return StreamingResponse(
+            buf,
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": "attachment; filename=registrations.csv"},
+        )
     buf = await ops.export_registrations_xlsx(db, event_id=event_id)
     return StreamingResponse(
         buf,

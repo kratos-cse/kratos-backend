@@ -137,6 +137,7 @@ class AdminRegistrationTeamSummary(BaseModel):
 class AdminRegistrationListItem(BaseModel):
     id: uuid.UUID
     event_id: uuid.UUID
+    event_name: Optional[str] = None
     profile_id: Optional[uuid.UUID] = None
     team_id: Optional[uuid.UUID] = None
     registration_type: str

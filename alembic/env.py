@@ -1,8 +1,9 @@
 import asyncio
+import os
 from logging.config import fileConfig
 
 from sqlalchemy import pool
-from sqlalchemy.engine import Connection
+from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
@@ -19,7 +20,33 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 _FALLBACK_URL = "postgresql+asyncpg://user:pass@localhost:5432/kratos"
-_database_url = settings.async_database_url or _FALLBACK_URL
+
+# Check settings, then os.environ, then Azure connection string aliases
+_raw_url = (
+    settings.DATABASE_URL
+    or os.environ.get("DATABASE_URL")
+    or os.environ.get("POSTGRESQLCONNSTR_DATABASE_URL")
+    or os.environ.get("CUSTOMCONNSTR_DATABASE_URL")
+    or ""
+).strip()
+
+if _raw_url:
+    if _raw_url.startswith("postgres://"):
+        _raw_url = _raw_url.replace("postgres://", "postgresql://", 1)
+    if _raw_url.startswith("postgresql://") and "+asyncpg" not in _raw_url:
+        _raw_url = _raw_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    if "sslmode=" in _raw_url:
+        _raw_url = _raw_url.replace("sslmode=", "ssl=")
+    _database_url = _raw_url
+else:
+    _database_url = _FALLBACK_URL
+
+try:
+    _u = make_url(_database_url)
+    print(f"--> [Alembic] Target Database: user='{_u.username}', host='{_u.host}', port={_u.port}, db='{_u.database}', query={dict(_u.query)}", flush=True)
+except Exception as _ex:
+    print(f"--> [Alembic] Error parsing database URL: {_ex}", flush=True)
+
 config.set_main_option("sqlalchemy.url", _database_url.replace("%", "%%"))
 
 
@@ -48,10 +75,14 @@ async def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
 
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
-
-    await connectable.dispose()
+    try:
+        async with connectable.connect() as connection:
+            await connection.run_sync(do_run_migrations)
+    except Exception as err:
+        print(f"--> [Alembic ERROR] DB Connection Failed: {type(err).__name__}: {err}", flush=True)
+        raise
+    finally:
+        await connectable.dispose()
 
 
 if context.is_offline_mode():
