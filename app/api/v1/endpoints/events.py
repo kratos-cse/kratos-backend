@@ -19,6 +19,9 @@ from app.models.profile import Profile
 from app.models.registration import Registration
 from app.models.team import Team, TeamMember
 from app.schemas.event import EventDetail, EventListItem, EventWhatsAppOut
+from app.schemas.event_content import ContentSectionOut, CoordinatorOut, RegistrationFormOut
+from app.services import event_content_service as content_svc
+from app.services import registration_field_service as field_svc
 from app.services.event_projection import build_event_state, build_event_state_from_remaining
 from app.services.event_service import batch_spots_remaining, get_cached_events_list, set_cached_events_list
 
@@ -79,6 +82,8 @@ async def get_event(event_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
 
     rules = event.rules
     state = await build_event_state(db, event, rules)
+    sections = await content_svc.get_visible_content_sections(db, event_id)
+    coordinators = await content_svc.get_visible_coordinators(db, event_id)
 
     return EventDetail(
         id=event.id,
@@ -89,6 +94,8 @@ async def get_event(event_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         category=event.category,
         coordinator=event.coordinator,
         coord_contact=event.coord_contact,
+        content_sections=[ContentSectionOut.model_validate(s) for s in sections],
+        coordinators=[CoordinatorOut.model_validate(c) for c in coordinators],
         fee=event.fee,
         venue=event.venue,
         capacity=event.capacity,
@@ -102,9 +109,18 @@ async def get_event(event_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         member_registration_mode=rules.member_registration_mode if rules else None,
         allow_team_invite_flow=rules.allow_team_invite_flow if rules else False,
         requires_qr_checkin=rules.requires_qr_checkin if rules else True,
-        custom_fields=rules.custom_fields if rules else None,
         **state,
     )
+
+
+@router.get("/{event_id}/registration-form", response_model=RegistrationFormOut)
+async def get_registration_form(event_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    """Public registration form field config for an event."""
+    result = await db.execute(select(Event).where(Event.id == event_id))
+    event = result.scalar_one_or_none()
+    if event is None or event.visibility != EventVisibility.PUBLISHED:
+        raise AppError(EVENT_NOT_FOUND, "Event not found", status_code=status.HTTP_404_NOT_FOUND)
+    return await field_svc.get_registration_form(db, event_id)
 
 
 async def _profile_entitled_to_whatsapp(db: AsyncSession, event_id: uuid.UUID, profile: Profile) -> bool:

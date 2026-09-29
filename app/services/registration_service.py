@@ -22,6 +22,7 @@ from app.models.enums import (
     EventRegistrationStatus,
     EventVisibility,
     PaymentStatus,
+    RegistrationFieldScope,
     RegistrationStatus,
     TeamMemberRole,
     TeamMemberStatus,
@@ -33,6 +34,7 @@ from app.models.registration import Registration
 from app.models.team import Team, TeamMember
 from app.schemas.registration import RegistrationCreateRequest, RegistrationType
 from app.services import qr_service
+from app.services.field_response_validator import persist_field_responses, validate_and_prepare_responses
 from app.services.admin_ops_service import invalidate_dashboard_cache
 from app.services.event_service import invalidate_spots_cache, is_registration_open, spots_remaining
 from app.services import audit_service
@@ -99,6 +101,14 @@ async def create_registration(
     if await _already_registered(db, event_id, profile.id):
         raise AppError(ALREADY_REGISTERED, "You are already registered for this event", status_code=409)
 
+    field_pairs = await validate_and_prepare_responses(
+        db,
+        event_id,
+        RegistrationFieldScope.REGISTRATION,
+        payload.field_responses,
+        profile=profile,
+    )
+
     if payload.registration_type == RegistrationType.SOLO:
         if rules and not rules.allow_individual:
             raise HTTPException(
@@ -107,6 +117,8 @@ async def create_registration(
 
         registration = Registration(event_id=event_id, profile_id=profile.id, status=RegistrationStatus.PENDING)
         db.add(registration)
+        await db.flush()
+        await persist_field_responses(db, field_pairs, registration_id=registration.id)
         try:
             await db.commit()
         except IntegrityError as exc:
@@ -137,6 +149,8 @@ async def create_registration(
 
     registration = Registration(event_id=event_id, team_id=team.id, status=RegistrationStatus.PENDING)
     db.add(registration)
+    await db.flush()
+    await persist_field_responses(db, field_pairs, registration_id=registration.id)
 
     try:
         await db.commit()

@@ -15,6 +15,7 @@ from app.models.enums import (
     RegistrationAvailability,
     RegistrationMode,
 )
+from app.schemas.event_content import ContentSectionOut, CoordinatorOut
 
 
 class EventListItem(BaseModel):
@@ -56,8 +57,10 @@ class EventDetail(BaseModel):
     short_desc: str | None
     long_desc: str | None
     category: EventCategory | None
-    coordinator: str | None
-    coord_contact: str | None
+    coordinator: str | None = None
+    coord_contact: str | None = None
+    content_sections: list[ContentSectionOut] = []
+    coordinators: list[CoordinatorOut] = []
     fee: Decimal | None
     venue: str | None
     capacity: int | None
@@ -81,7 +84,7 @@ class EventDetail(BaseModel):
     member_registration_mode: MemberRegistrationMode | None
     allow_team_invite_flow: bool
     requires_qr_checkin: bool
-    custom_fields: dict[str, Any] | None
+    custom_fields: dict[str, Any] | None = None
 
 
 class EventWhatsAppOut(BaseModel):

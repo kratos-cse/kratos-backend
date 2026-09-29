@@ -134,3 +134,38 @@ class DuplicateScanBehavior(str, enum.Enum):
     REJECT = "REJECT"
     ACCEPT = "ACCEPT"
     WARN = "WARN"
+
+
+class ContentSectionType(str, enum.Enum):
+    REQUIREMENTS = "REQUIREMENTS"
+    RULES = "RULES"
+    ELIGIBILITY = "ELIGIBILITY"
+    PRIZES = "PRIZES"
+    INSTRUCTIONS = "INSTRUCTIONS"
+    WHAT_TO_BRING = "WHAT_TO_BRING"
+    FORMAT = "FORMAT"
+    JUDGING_CRITERIA = "JUDGING_CRITERIA"
+    CUSTOM = "CUSTOM"
+
+
+class RegistrationFieldScope(str, enum.Enum):
+    REGISTRATION = "REGISTRATION"
+    TEAM_MEMBER = "TEAM_MEMBER"
+
+
+class RegistrationFieldType(str, enum.Enum):
+    TEXT = "TEXT"
+    TEXTAREA = "TEXTAREA"
+    NUMBER = "NUMBER"
+    EMAIL = "EMAIL"
+    PHONE = "PHONE"
+    DATE = "DATE"
+    MCQ = "MCQ"
+    SINGLE_SELECT = "SINGLE_SELECT"
+    MULTI_SELECT = "MULTI_SELECT"
+    CHECKBOX = "CHECKBOX"
+
+
+class RegistrationFieldSource(str, enum.Enum):
+    CUSTOM = "CUSTOM"
+    PROFILE = "PROFILE"

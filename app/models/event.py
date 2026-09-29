@@ -57,6 +57,15 @@ class Event(Base):
     rules: Mapped[Optional["EventRegistrationRule"]] = relationship(
         "EventRegistrationRule", back_populates="event", uselist=False
     )
+    content_sections: Mapped[list["EventContentSection"]] = relationship(
+        "EventContentSection", back_populates="event", order_by="EventContentSection.display_order"
+    )
+    coordinators: Mapped[list["EventCoordinator"]] = relationship(
+        "EventCoordinator", back_populates="event", order_by="EventCoordinator.display_order"
+    )
+    registration_fields: Mapped[list["EventRegistrationField"]] = relationship(
+        "EventRegistrationField", back_populates="event"
+    )
 
 
 class EventRegistrationRule(Base):

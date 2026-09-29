@@ -28,6 +28,7 @@ from app.models.enums import (
     EventRegistrationStatus,
     EventVisibility,
     MemberRegistrationMode,
+    RegistrationFieldScope,
     RegistrationStatus,
     TeamMemberEntrySource,
     TeamMemberRole,
@@ -35,6 +36,7 @@ from app.models.enums import (
     TeamStatus,
 )
 from app.services import notification_service, qr_service
+from app.services.field_response_validator import persist_field_responses, validate_and_prepare_responses
 from app.models.event import Event, EventRegistrationRule
 from app.models.profile import Profile
 from app.models.registration import Registration
@@ -327,7 +329,12 @@ async def get_invitation_public(db: AsyncSession, invite_code: str) -> dict:
     }
 
 
-async def join_via_invitation(db: AsyncSession, invite_code: str, profile: Profile) -> dict:
+async def join_via_invitation(
+    db: AsyncSession,
+    invite_code: str,
+    profile: Profile,
+    field_responses: list | None = None,
+) -> dict:
     result = await db.execute(select(TeamInvitation).where(TeamInvitation.code == invite_code))
     invitation = result.scalar_one_or_none()
     if not invitation or not invitation.is_active:
@@ -384,6 +391,15 @@ async def join_via_invitation(db: AsyncSession, invite_code: str, profile: Profi
     except ValueError:
         raise AppError(TEAM_FULL, "Team roster is full", status_code=409)
 
+    field_pairs = await validate_and_prepare_responses(
+        db,
+        team.event_id,
+        RegistrationFieldScope.TEAM_MEMBER,
+        field_responses or [],
+        team_member=None,
+        member_profile=profile,
+    )
+
     member = TeamMember(
         team_id=team.id,
         event_id=team.event_id,
@@ -394,6 +410,7 @@ async def join_via_invitation(db: AsyncSession, invite_code: str, profile: Profi
     )
     db.add(member)
     await db.flush()
+    await persist_field_responses(db, field_pairs, team_member_id=member.id)
 
     # Re-check under the same FOR UPDATE lock after insert (concurrency safety).
     members = await _load_members_with_profiles(db, team.id)
@@ -485,11 +502,13 @@ async def add_roster_member(
         raise AppError(TEAM_MANDATORY_FULL, "Mandatory roster is already full", status_code=409)
 
     entry_source = TeamMemberEntrySource.LEADER_ENTERED
+    member_profile: Profile | None = None
 
     if payload.profile_id:
         entry_source = TeamMemberEntrySource.LINKED_ACCOUNT
-        pref = await db.execute(select(Profile).where(Profile.id == payload.profile_id))
-        if not pref.scalar_one_or_none():
+        pref_result = await db.execute(select(Profile).where(Profile.id == payload.profile_id))
+        member_profile = pref_result.scalar_one_or_none()
+        if member_profile is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Profile not found")
         existing = await db.execute(
             select(TeamMember).where(
@@ -510,7 +529,7 @@ async def add_roster_member(
         if not payload.full_name or not payload.phone:
             raise AppError(ROSTER_INVALID, "full_name and phone are required for leader-entered members", status_code=400)
 
-    member = TeamMember(
+    pending_member = TeamMember(
         team_id=team.id,
         event_id=team.event_id,
         profile_id=payload.profile_id,
@@ -523,8 +542,20 @@ async def add_roster_member(
         college_name=payload.college_name if entry_source == TeamMemberEntrySource.LEADER_ENTERED else None,
         year_of_study=payload.year_of_study if entry_source == TeamMemberEntrySource.LEADER_ENTERED else None,
     )
+
+    field_pairs = await validate_and_prepare_responses(
+        db,
+        team.event_id,
+        RegistrationFieldScope.TEAM_MEMBER,
+        payload.field_responses,
+        team_member=pending_member,
+        member_profile=member_profile,
+    )
+
+    member = pending_member
     db.add(member)
     await db.flush()
+    await persist_field_responses(db, field_pairs, team_member_id=member.id)
 
     members = await _load_members_with_profiles(db, team.id)
     active = _active_members(members)

@@ -9,6 +9,7 @@ from app.models.profile import Profile
 from app.schemas.team import (
     InvitationOut,
     InvitationPublicOut,
+    JoinTeamRequest,
     JoinTeamResponse,
     RosterAddRequest,
     TeamCreateRequest,
@@ -97,10 +98,16 @@ async def get_invitation(invite_code: str, db: AsyncSession = Depends(get_db)):
 @router.post("/team-invitations/{invite_code}/join", response_model=JoinTeamResponse)
 async def join_team(
     invite_code: str,
+    body: JoinTeamRequest | None = None,
     db: AsyncSession = Depends(get_db),
     profile: Profile = Depends(get_current_profile),
 ):
-    return await team_service.join_via_invitation(db, invite_code=invite_code, profile=profile)
+    return await team_service.join_via_invitation(
+        db,
+        invite_code=invite_code,
+        profile=profile,
+        field_responses=body.field_responses if body else [],
+    )
 
 
 @router.post("/teams/{team_id}/members/{member_id}/leave", response_model=TeamMemberOut)

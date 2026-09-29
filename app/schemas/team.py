@@ -10,6 +10,7 @@ from app.models.enums import (
     TeamMemberStatus,
     TeamStatus,
 )
+from app.schemas.event_content import FieldResponseInput
 
 
 class TeamCreateRequest(BaseModel):
@@ -82,6 +83,10 @@ class InvitationPublicOut(BaseModel):
     is_active: bool
 
 
+class JoinTeamRequest(BaseModel):
+    field_responses: list[FieldResponseInput] = []
+
+
 class JoinTeamResponse(BaseModel):
     team: TeamOut
     member: TeamMemberOut
@@ -98,6 +103,7 @@ class RosterAddRequest(BaseModel):
     contact_email: Optional[str] = Field(default=None, max_length=255)
     college_name: Optional[str] = Field(default=None, max_length=200)
     year_of_study: Optional[str] = Field(default=None, max_length=50)
+    field_responses: list[FieldResponseInput] = []
 
     @model_validator(mode="after")
     def require_identity(self) -> "RosterAddRequest":
