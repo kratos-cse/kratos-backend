@@ -1,10 +1,13 @@
 """Admin operations — dashboard aggregates, team admin actions, Excel exports."""
+import csv
 import uuid
-from io import BytesIO
+from io import BytesIO, StringIO
 from typing import Any, Optional
 
 from fastapi import HTTPException, status
 from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -246,30 +249,162 @@ async def cancel_registration_admin(db: AsyncSession, registration_id: uuid.UUID
     return registration
 
 
-def _workbook_bytes(headers: list[str], rows: list[list[Any]]) -> BytesIO:
+def _format_worksheet(ws, headers: list[str], rows: list[list[Any]]):
+    ws.append(headers)
+
+    header_fill = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
+    header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=False)
+
+    for col_idx in range(1, len(headers) + 1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = header_alignment
+
+    data_font = Font(name="Calibri", size=10)
+    data_alignment = Alignment(vertical="center")
+
+    for r_idx, row in enumerate(rows, start=2):
+        ws.append(row)
+        for col_idx in range(1, len(row) + 1):
+            cell = ws.cell(row=r_idx, column=col_idx)
+            cell.font = data_font
+            cell.alignment = data_alignment
+
+    for col in ws.columns:
+        max_len = 0
+        col_letter = get_column_letter(col[0].column)
+        for cell in col:
+            val_str = str(cell.value or "")
+            if "\n" in val_str:
+                val_str = max(val_str.split("\n"), key=len)
+            if len(val_str) > max_len:
+                max_len = len(val_str)
+        ws.column_dimensions[col_letter].width = min(max(max_len + 4, 12), 60)
+
+    ws.freeze_panes = "A2"
+    if rows:
+        ws.auto_filter.ref = ws.dimensions
+
+
+def _multi_sheet_workbook_bytes(
+    headers: list[str],
+    sheets_data: dict[str, list[list[Any]]],
+) -> BytesIO:
+    wb = Workbook()
+    
+    # Remove default sheet
+    if "Sheet" in wb.sheetnames:
+        wb.remove(wb["Sheet"])
+        
+    for title, rows in sheets_data.items():
+        # Sheet titles max 31 chars and no invalid chars
+        safe_title = "".join(c for c in title if c not in r"\/?*[]")[:31]
+        if not safe_title:
+            safe_title = "Sheet"
+        # Ensure unique title
+        base_title = safe_title
+        counter = 1
+        while safe_title in wb.sheetnames:
+            suffix = f" {counter}"
+            safe_title = base_title[:31 - len(suffix)] + suffix
+            counter += 1
+            
+        ws = wb.create_sheet(title=safe_title)
+        _format_worksheet(ws, headers, rows)
+        
+    # If no sheets created, create an empty one
+    if not wb.sheetnames:
+        ws = wb.create_sheet(title="Registrations")
+        _format_worksheet(ws, headers, [])
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+def _workbook_bytes(
+    headers: list[str],
+    rows: list[list[Any]],
+    sheet_title: str = "Sheet1",
+) -> BytesIO:
     wb = Workbook()
     ws = wb.active
-    ws.append(headers)
-    for row in rows:
-        ws.append(row)
+    ws.title = sheet_title[:31]
+    _format_worksheet(ws, headers, rows)
     buf = BytesIO()
     wb.save(buf)
     buf.seek(0)
     return buf
 
 
-async def export_registrations_xlsx(db: AsyncSession, event_id: Optional[uuid.UUID] = None) -> BytesIO:
+def _csv_bytes(headers: list[str], rows: list[list[Any]]) -> BytesIO:
+    buf = BytesIO()
+    # Removed UTF-8 BOM as it can cause Google Sheets to parse all info in a single column
+    text_io = StringIO()
+    writer = csv.writer(text_io, dialect="excel")
+    writer.writerow(headers)
+    for row in rows:
+        writer.writerow(row)
+    buf.write(text_io.getvalue().encode("utf-8"))
+    buf.seek(0)
+    return buf
+
+
+REGISTRATION_EXPORT_HEADERS = [
+    "Registration ID",
+    "Event ID",
+    "Event Name",
+    "Registration Type",
+    "Registration Status",
+    "Participant / Leader Name",
+    "Contact Email",
+    "Phone Number",
+    "College Name",
+    "Department",
+    "Year of Study",
+    "Team ID",
+    "Team Name",
+    "Active Members Count",
+    "Team Members Roster",
+    "Payment ID",
+    "Payment Status",
+    "Amount (INR)",
+    "Payment Type",
+    "Razorpay Order ID",
+    "Razorpay Payment ID",
+    "Created At",
+]
+
+
+async def _get_registration_export_data(
+    db: AsyncSession, event_id: Optional[uuid.UUID] = None
+) -> tuple[list[str], list[list[Any]]]:
     q = (
         select(Registration)
-        .options(selectinload(Registration.team), selectinload(Registration.payment))
-        .order_by(Registration.created_at)
+        .options(
+            selectinload(Registration.event),
+            selectinload(Registration.team).selectinload(Team.members),
+            selectinload(Registration.payment),
+        )
+        .order_by(Registration.created_at.desc())
     )
     if event_id:
         q = q.where(Registration.event_id == event_id)
     result = await db.execute(q)
     registrations = result.scalars().all()
 
-    profile_ids = {r.profile_id for r in registrations if r.profile_id}
+    profile_ids: set[uuid.UUID] = set()
+    for r in registrations:
+        if r.profile_id:
+            profile_ids.add(r.profile_id)
+        if r.team:
+            if r.team.leader_profile_id:
+                profile_ids.add(r.team.leader_profile_id)
+            for m in (r.team.members or []):
+                if m.profile_id:
+                    profile_ids.add(m.profile_id)
+
     profiles: dict[uuid.UUID, Profile] = {}
     if profile_ids:
         prof_result = await db.execute(select(Profile).where(Profile.id.in_(profile_ids)))
@@ -277,36 +412,114 @@ async def export_registrations_xlsx(db: AsyncSession, event_id: Optional[uuid.UU
 
     rows = []
     for r in registrations:
-        prof = profiles.get(r.profile_id) if r.profile_id else None
+        reg_type = derive_registration_type(r)
+        event_name = r.event.name if r.event else ""
+
+        # Main contact: solo participant or team leader
+        main_profile: Optional[Profile] = None
+        if r.profile_id:
+            main_profile = profiles.get(r.profile_id)
+        elif r.team and r.team.leader_profile_id:
+            main_profile = profiles.get(r.team.leader_profile_id)
+
+        participant_name = main_profile.full_name if main_profile else ""
+        contact_email = main_profile.contact_email if main_profile else ""
+        phone = main_profile.phone if main_profile else ""
+        college = main_profile.college_name if main_profile else ""
+        department = main_profile.department if main_profile else ""
+        year = str(main_profile.year_of_study) if (main_profile and main_profile.year_of_study is not None) else ""
+
+        team_id_str = str(r.team_id) if r.team_id else ""
+        team_name = r.team.name if r.team else ""
+        active_count = len(_active_team_members(r.team)) if r.team else ""
+
+        roster_str = ""
+        if r.team:
+            members_summary = []
+            for m in _active_team_members(r.team):
+                m_prof = profiles.get(m.profile_id) if m.profile_id else None
+                m_name = m_prof.full_name if m_prof else "Unknown"
+                m_role = m.role.value if hasattr(m.role, "value") else str(m.role)
+                m_phone = f", {m_prof.phone}" if (m_prof and m_prof.phone) else ""
+                members_summary.append(f"{m_name} ({m_role}{m_phone})")
+            roster_str = "; ".join(members_summary)
+
+        payment_id_str = str(r.payment_id) if r.payment_id else ""
+        payment_status_str = (
+            r.payment.status.value
+            if (r.payment and hasattr(r.payment.status, "value"))
+            else (str(r.payment.status) if r.payment else "")
+        )
+        amount_inr = (
+            f"{r.payment.amount_paise / 100:.2f}"
+            if (r.payment and r.payment.amount_paise is not None)
+            else ""
+        )
+        payment_type_str = (
+            r.payment.payment_type.value
+            if (r.payment and hasattr(r.payment.payment_type, "value"))
+            else (str(r.payment.payment_type) if r.payment else "")
+        )
+        order_id = r.payment.razorpay_order_id if r.payment else ""
+        payment_tx_id = r.payment.razorpay_payment_id or "" if r.payment else ""
+
+        status_val = r.status.value if hasattr(r.status, "value") else str(r.status)
+        created_str = r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else ""
+
         rows.append(
             [
                 str(r.id),
                 str(r.event_id),
-                r.status.value if hasattr(r.status, "value") else r.status,
-                str(r.profile_id) if r.profile_id else "",
-                prof.full_name if prof else "",
-                str(r.team_id) if r.team_id else "",
-                r.team.name if r.team else "",
-                str(r.payment_id) if r.payment_id else "",
-                r.payment.status.value if r.payment else "",
-                r.created_at.isoformat() if r.created_at else "",
+                event_name,
+                reg_type,
+                status_val,
+                participant_name,
+                contact_email,
+                phone,
+                college,
+                department,
+                year,
+                team_id_str,
+                team_name,
+                active_count,
+                roster_str,
+                payment_id_str,
+                payment_status_str,
+                amount_inr,
+                payment_type_str,
+                order_id,
+                payment_tx_id,
+                created_str,
             ]
         )
-    return _workbook_bytes(
-        [
-            "registration_id",
-            "event_id",
-            "status",
-            "profile_id",
-            "full_name",
-            "team_id",
-            "team_name",
-            "payment_id",
-            "payment_status",
-            "created_at",
-        ],
-        rows,
-    )
+
+    return REGISTRATION_EXPORT_HEADERS, rows
+
+
+async def export_registrations_xlsx(db: AsyncSession, event_id: Optional[uuid.UUID] = None) -> BytesIO:
+    headers, rows = await _get_registration_export_data(db, event_id=event_id)
+    
+    # Event name is at index 2 (REGISTRATION_EXPORT_HEADERS = ["Registration ID", "Event ID", "Event Name", ...])
+    event_name_idx = 2
+    
+    if event_id and rows:
+        # Single event export
+        event_name = rows[0][event_name_idx] or "Registrations"
+        return _workbook_bytes(headers, rows, sheet_title=event_name)
+    else:
+        # Multi-event export
+        from collections import defaultdict
+        grouped = defaultdict(list)
+        for row in rows:
+            ename = row[event_name_idx] or "Unknown Event"
+            grouped[ename].append(row)
+        
+        return _multi_sheet_workbook_bytes(headers, dict(grouped))
+
+
+async def export_registrations_csv(db: AsyncSession, event_id: Optional[uuid.UUID] = None) -> BytesIO:
+    headers, rows = await _get_registration_export_data(db, event_id=event_id)
+    return _csv_bytes(headers, rows)
 
 
 async def export_payments_xlsx(db: AsyncSession) -> BytesIO:
@@ -479,6 +692,7 @@ def serialize_admin_registration(registration: Registration) -> dict[str, Any]:
     return {
         "id": registration.id,
         "event_id": registration.event_id,
+        "event_name": registration.event.name if registration.event is not None else None,
         "profile_id": registration.profile_id,
         "team_id": registration.team_id,
         "registration_type": registration_type,
