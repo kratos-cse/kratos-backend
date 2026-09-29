@@ -1,5 +1,14 @@
 #!/usr/bin/env sh
-# Railway / production entrypoint: migrate then serve (LF line endings).
+# Railway / Azure production entrypoint: activate venv, migrate, then serve.
 set -e
-alembic upgrade head
-exec uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-8000}"
+
+if [ -f "antenv/bin/activate" ]; then
+    . antenv/bin/activate
+elif [ -f "/antenv/bin/activate" ]; then
+    . /antenv/bin/activate
+elif [ -f "/home/site/wwwroot/antenv/bin/activate" ]; then
+    . /home/site/wwwroot/antenv/bin/activate
+fi
+
+python -m alembic upgrade head
+exec python -m uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-8000}"
