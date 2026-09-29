@@ -24,7 +24,8 @@ async def google_login(payload: GoogleAuthRequest, db: AsyncSession = Depends(ge
     PROFILES row alongside it, then issues our own JWT for subsequent
     requests.
     """
-    google_payload = verify_google_id_token(payload.id_token)
+    from fastapi.concurrency import run_in_threadpool
+    google_payload = await run_in_threadpool(verify_google_id_token, payload.id_token)
 
     result = await db.execute(select(User).where(User.google_sub == google_payload.sub))
     user = result.scalar_one_or_none()
