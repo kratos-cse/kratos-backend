@@ -1,6 +1,7 @@
 # --- Web framework ---
 fastapi>=0.111,<0.116
 uvicorn[standard]>=0.30,<0.35
+orjson>=3.10,<4.0
 
 # --- Database ---
 SQLAlchemy>=2.0,<2.1

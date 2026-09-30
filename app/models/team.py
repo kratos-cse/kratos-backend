@@ -7,7 +7,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
-from app.models.enums import TeamMemberEntrySource, TeamMemberRole, TeamMemberStatus, TeamStatus
+from app.models.enums import Gender, TeamMemberEntrySource, TeamMemberRole, TeamMemberStatus, TeamStatus
 
 
 class Team(Base):
@@ -80,6 +80,9 @@ class TeamMember(Base):
     contact_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     college_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     year_of_study: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    gender: Mapped[Optional[Gender]] = mapped_column(
+        Enum(Gender, name="gender", native_enum=True), nullable=True
+    )
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     team: Mapped["Team"] = relationship("Team", back_populates="members")

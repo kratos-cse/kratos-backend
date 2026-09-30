@@ -20,7 +20,7 @@ from app.models.team import TeamMember
 from app.schemas.event_content import FieldResponseInput
 
 PROFILE_FIELD_KEYS = frozenset(
-    {"full_name", "contact_email", "phone", "college_name", "department", "year_of_study"}
+    {"full_name", "contact_email", "phone", "college_name", "department", "year_of_study", "gender"}
 )
 
 
@@ -36,15 +36,22 @@ def _field_options(field: EventRegistrationField) -> list[str]:
     return []
 
 
+def _normalize_extracted(val: Any) -> Any:
+    if hasattr(val, "value"):
+        return val.value
+    return val
+
+
 def _profile_value(profile: Profile, key: str) -> Any:
-    return getattr(profile, key, None)
+    val = getattr(profile, key, None)
+    return _normalize_extracted(val)
 
 
 def _team_member_value(member: TeamMember | None, profile: Profile | None, key: str) -> Any:
     if member is not None:
         val = getattr(member, key, None)
         if val is not None and str(val).strip():
-            return val
+            return _normalize_extracted(val)
     if profile is not None:
         return _profile_value(profile, key)
     return None

@@ -15,6 +15,7 @@ from sqlalchemy.orm import selectinload
 from app.models.attendance import AttendanceScan
 from app.models.enums import (
     PaymentType,
+    RegistrationFieldScope,
     RegistrationMode,
     RegistrationStatus,
     TeamMemberRole,
@@ -22,6 +23,7 @@ from app.models.enums import (
     TeamStatus,
 )
 from app.models.event import Event, EventRegistrationRule
+from app.models.event_content import EventRegistrationField, RegistrationFieldResponse
 from app.models.payment import Payment
 from app.models.profile import Profile
 from app.models.registration import Registration
@@ -363,6 +365,7 @@ REGISTRATION_EXPORT_HEADERS = [
     "College Name",
     "Department",
     "Year of Study",
+    "Gender",
     "Team ID",
     "Team Name",
     "Active Members Count",
@@ -410,6 +413,34 @@ async def _get_registration_export_data(
         prof_result = await db.execute(select(Profile).where(Profile.id.in_(profile_ids)))
         profiles = {p.id: p for p in prof_result.scalars().all()}
 
+    # Load custom registration fields if single event export
+    custom_fields: list[EventRegistrationField] = []
+    field_resp_map: dict[tuple[uuid.UUID, uuid.UUID], Any] = {}
+    if event_id and registrations:
+        cf_res = await db.execute(
+            select(EventRegistrationField)
+            .where(
+                EventRegistrationField.event_id == event_id,
+                EventRegistrationField.scope == RegistrationFieldScope.REGISTRATION,
+                EventRegistrationField.is_visible.is_(True),
+            )
+            .order_by(EventRegistrationField.display_order)
+        )
+        custom_fields = list(cf_res.scalars().all())
+
+        reg_ids = [r.id for r in registrations]
+        fr_res = await db.execute(
+            select(RegistrationFieldResponse).where(
+                RegistrationFieldResponse.registration_id.in_(reg_ids)
+            )
+        )
+        for fr in fr_res.scalars().all():
+            field_resp_map[(fr.registration_id, fr.field_id)] = fr.value
+
+    headers = list(REGISTRATION_EXPORT_HEADERS)
+    for cf in custom_fields:
+        headers.append(f"Field: {cf.label}")
+
     rows = []
     for r in registrations:
         reg_type = derive_registration_type(r)
@@ -428,6 +459,11 @@ async def _get_registration_export_data(
         college = main_profile.college_name if main_profile else ""
         department = main_profile.department if main_profile else ""
         year = str(main_profile.year_of_study) if (main_profile and main_profile.year_of_study is not None) else ""
+        gender_str = (
+            main_profile.gender.value
+            if (main_profile and main_profile.gender and hasattr(main_profile.gender, "value"))
+            else (str(main_profile.gender) if (main_profile and main_profile.gender) else "")
+        )
 
         team_id_str = str(r.team_id) if r.team_id else ""
         team_name = r.team.name if r.team else ""
@@ -438,10 +474,13 @@ async def _get_registration_export_data(
             members_summary = []
             for m in _active_team_members(r.team):
                 m_prof = profiles.get(m.profile_id) if m.profile_id else None
-                m_name = m_prof.full_name if m_prof else "Unknown"
+                m_name = (m_prof.full_name if m_prof else m.full_name) or "Unknown"
                 m_role = m.role.value if hasattr(m.role, "value") else str(m.role)
-                m_phone = f", {m_prof.phone}" if (m_prof and m_prof.phone) else ""
-                members_summary.append(f"{m_name} ({m_role}{m_phone})")
+                phone_val = (m_prof.phone if m_prof else m.phone) or ""
+                m_phone = f", {phone_val}" if phone_val else ""
+                gender_val = (m_prof.gender if m_prof else getattr(m, "gender", None)) or ""
+                m_gender = f", {gender_val.value if hasattr(gender_val, 'value') else gender_val}" if gender_val else ""
+                members_summary.append(f"{m_name} ({m_role}{m_phone}{m_gender})")
             roster_str = "; ".join(members_summary)
 
         payment_id_str = str(r.payment_id) if r.payment_id else ""
@@ -466,34 +505,41 @@ async def _get_registration_export_data(
         status_val = r.status.value if hasattr(r.status, "value") else str(r.status)
         created_str = r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else ""
 
-        rows.append(
-            [
-                str(r.id),
-                str(r.event_id),
-                event_name,
-                reg_type,
-                status_val,
-                participant_name,
-                contact_email,
-                phone,
-                college,
-                department,
-                year,
-                team_id_str,
-                team_name,
-                active_count,
-                roster_str,
-                payment_id_str,
-                payment_status_str,
-                amount_inr,
-                payment_type_str,
-                order_id,
-                payment_tx_id,
-                created_str,
-            ]
-        )
+        row = [
+            str(r.id),
+            str(r.event_id),
+            event_name,
+            reg_type,
+            status_val,
+            participant_name,
+            contact_email,
+            phone,
+            college,
+            department,
+            year,
+            gender_str,
+            team_id_str,
+            team_name,
+            active_count,
+            roster_str,
+            payment_id_str,
+            payment_status_str,
+            amount_inr,
+            payment_type_str,
+            order_id,
+            payment_tx_id,
+            created_str,
+        ]
+        for cf in custom_fields:
+            val = field_resp_map.get((r.id, cf.id), "")
+            if isinstance(val, (list, dict)):
+                import json
+                row.append(json.dumps(val))
+            else:
+                row.append(str(val) if val is not None else "")
+        rows.append(row)
 
-    return REGISTRATION_EXPORT_HEADERS, rows
+    return headers, rows
 
 
 async def export_registrations_xlsx(db: AsyncSession, event_id: Optional[uuid.UUID] = None) -> BytesIO:

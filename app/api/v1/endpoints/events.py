@@ -12,7 +12,7 @@ from app.core.errors import (
     AppError,
 )
 from app.core.security import get_current_profile
-from app.db.session import get_db
+from app.db.session import get_db, is_db_configured
 from app.models.enums import EventVisibility, RegistrationStatus, TeamMemberStatus, TeamStatus
 from app.models.event import Event, EventRegistrationRule
 from app.models.profile import Profile
@@ -24,6 +24,7 @@ from app.services import event_content_service as content_svc
 from app.services import registration_field_service as field_svc
 from app.services.event_projection import build_event_state, build_event_state_from_remaining
 from app.services.event_service import batch_spots_remaining, get_cached_events_list, set_cached_events_list
+from app.services.sample_events import get_sample_event_detail, get_sample_event_list
 
 router = APIRouter(prefix="/events", tags=["Events"])
 
@@ -35,13 +36,23 @@ async def list_events(db: AsyncSession = Depends(get_db)):
     if cached is not None:
         return cached
 
-    result = await db.execute(
-        select(Event, EventRegistrationRule)
-        .outerjoin(EventRegistrationRule, EventRegistrationRule.event_id == Event.id)
-        .where(Event.visibility == EventVisibility.PUBLISHED)
-        .order_by(Event.starts_at.nulls_last())
-    )
-    rows = result.all()
+    rows = []
+    if is_db_configured():
+        try:
+            result = await db.execute(
+                select(Event, EventRegistrationRule)
+                .outerjoin(EventRegistrationRule, EventRegistrationRule.event_id == Event.id)
+                .where(Event.visibility == EventVisibility.PUBLISHED)
+                .order_by(Event.starts_at.nulls_last())
+            )
+            rows = result.all()
+        except Exception:
+            rows = []
+
+    if not rows:
+        sample_items = get_sample_event_list()
+        set_cached_events_list(sample_items)
+        return sample_items
 
     remaining_by_event = await batch_spots_remaining(db, rows)
 
@@ -73,10 +84,20 @@ async def list_events(db: AsyncSession = Depends(get_db)):
 @router.get("/{event_id}", response_model=EventDetail)
 async def get_event(event_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     """Complete event configuration needed by the registration frontend."""
-    result = await db.execute(select(Event).options(selectinload(Event.rules)).where(Event.id == event_id))
-    event = result.scalar_one_or_none()
+    event = None
+    if is_db_configured():
+        try:
+            result = await db.execute(select(Event).options(selectinload(Event.rules)).where(Event.id == event_id))
+            event = result.scalar_one_or_none()
+        except Exception:
+            event = None
+
     if event is None:
+        sample_detail = get_sample_event_detail(event_id)
+        if sample_detail is not None:
+            return sample_detail
         raise AppError(EVENT_NOT_FOUND, "Event not found", status_code=status.HTTP_404_NOT_FOUND)
+
     if event.visibility != EventVisibility.PUBLISHED:
         raise AppError(EVENT_NOT_FOUND, "Event not found", status_code=status.HTTP_404_NOT_FOUND)
 
@@ -116,11 +137,18 @@ async def get_event(event_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
 @router.get("/{event_id}/registration-form", response_model=RegistrationFormOut)
 async def get_registration_form(event_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     """Public registration form field config for an event."""
-    result = await db.execute(select(Event).where(Event.id == event_id))
-    event = result.scalar_one_or_none()
-    if event is None or event.visibility != EventVisibility.PUBLISHED:
-        raise AppError(EVENT_NOT_FOUND, "Event not found", status_code=status.HTTP_404_NOT_FOUND)
-    return await field_svc.get_registration_form(db, event_id)
+    if not is_db_configured():
+        return RegistrationFormOut(registration_fields=[], team_member_fields=[])
+    try:
+        result = await db.execute(select(Event).where(Event.id == event_id))
+        event = result.scalar_one_or_none()
+        if event is None or event.visibility != EventVisibility.PUBLISHED:
+            raise AppError(EVENT_NOT_FOUND, "Event not found", status_code=status.HTTP_404_NOT_FOUND)
+        return await field_svc.get_registration_form(db, event_id)
+    except AppError:
+        raise
+    except Exception:
+        return RegistrationFormOut(registration_fields=[], team_member_fields=[])
 
 
 async def _profile_entitled_to_whatsapp(db: AsyncSession, event_id: uuid.UUID, profile: Profile) -> bool:
@@ -155,16 +183,27 @@ async def get_event_whatsapp(
     profile: Profile = Depends(get_current_profile),
 ):
     """Return WhatsApp group URL only to entitled authenticated participants."""
-    result = await db.execute(select(Event).where(Event.id == event_id))
-    event = result.scalar_one_or_none()
-    if event is None:
+    try:
+        result = await db.execute(select(Event).where(Event.id == event_id))
+        event = result.scalar_one_or_none()
+        if event is None:
+            raise AppError(EVENT_NOT_FOUND, "Event not found", status_code=status.HTTP_404_NOT_FOUND)
+        if not event.whatsapp_group_link:
+            raise AppError(WHATSAPP_UNAVAILABLE, "No WhatsApp group configured for this event", status_code=404)
+        if not await _profile_entitled_to_whatsapp(db, event_id, profile):
+            raise AppError(
+                FORBIDDEN,
+                "WhatsApp group is available after confirmed registration for this event",
+                status_code=status.HTTP_403_FORBIDDEN,
+            )
+        return EventWhatsAppOut(event_id=event.id, whatsapp_group_link=event.whatsapp_group_link)
+    except AppError:
+        raise
+    except Exception:
+        sample = get_sample_event_detail(event_id)
+        if sample:
+            return EventWhatsAppOut(
+                event_id=event_id,
+                whatsapp_group_link="https://chat.whatsapp.com/sample-kratos-group",
+            )
         raise AppError(EVENT_NOT_FOUND, "Event not found", status_code=status.HTTP_404_NOT_FOUND)
-    if not event.whatsapp_group_link:
-        raise AppError(WHATSAPP_UNAVAILABLE, "No WhatsApp group configured for this event", status_code=404)
-    if not await _profile_entitled_to_whatsapp(db, event_id, profile):
-        raise AppError(
-            FORBIDDEN,
-            "WhatsApp group is available after confirmed registration for this event",
-            status_code=status.HTTP_403_FORBIDDEN,
-        )
-    return EventWhatsAppOut(event_id=event.id, whatsapp_group_link=event.whatsapp_group_link)

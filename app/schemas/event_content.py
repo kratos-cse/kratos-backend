@@ -61,6 +61,13 @@ class FieldResponseInput(BaseModel):
     value: Any = None
 
 
+class FieldResponseOut(BaseModel):
+    field_id: uuid.UUID
+    field_key: str | None = None
+    label: str | None = None
+    value: Any = None
+
+
 class ContentSectionCreate(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     content: str = ""

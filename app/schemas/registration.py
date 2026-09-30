@@ -5,8 +5,8 @@ from enum import Enum
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.enums import PaymentStatus, RegistrationStatus, TeamStatus
-from app.schemas.event_content import FieldResponseInput
-from app.schemas.team import TeamMemberOut
+from app.schemas.event_content import FieldResponseInput, FieldResponseOut
+from app.schemas.team import RosterMemberInput, TeamMemberOut
 
 
 class RegistrationType(str, Enum):
@@ -18,6 +18,7 @@ class RegistrationCreateRequest(BaseModel):
     registration_type: RegistrationType
     team_name: str | None = Field(default=None, min_length=1, max_length=150)
     field_responses: list[FieldResponseInput] = []
+    roster_members: list[RosterMemberInput] = []
 
     @model_validator(mode="after")
     def team_name_required_for_team(self) -> "RegistrationCreateRequest":
@@ -55,6 +56,7 @@ class RegistrationOut(BaseModel):
     profile_id: uuid.UUID | None = None
     team: TeamOut | None = None
     payment: PaymentSummary | None = None
+    field_responses: list[FieldResponseOut] = []
 
 
 class ReceiptOut(BaseModel):

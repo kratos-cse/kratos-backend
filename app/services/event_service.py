@@ -95,27 +95,23 @@ async def _count_used_capacity(db: AsyncSession, event: Event, rules: Optional[E
         )
         return result.scalar_one()
 
-    # PARTICIPANTS: solo regs + active/pending members (not the team Registration row).
-    solo_count = (
-        await db.execute(
+    # PARTICIPANTS: solo regs + active/pending members (single roundtrip).
+    stmt = select(
+        (
             select(func.count()).select_from(Registration).where(
                 Registration.event_id == event.id,
                 Registration.profile_id.isnot(None),
                 Registration.status != RegistrationStatus.CANCELLED,
-            )
-        )
-    ).scalar_one()
-
-    member_count = (
-        await db.execute(
+            ).scalar_subquery()
+            +
             select(func.count()).select_from(TeamMember).where(
                 TeamMember.event_id == event.id,
                 TeamMember.status.in_([TeamMemberStatus.ACTIVE, TeamMemberStatus.PENDING_PAYMENT]),
-            )
-        )
-    ).scalar_one()
-
-    return solo_count + member_count
+            ).scalar_subquery()
+        ).label("total_used")
+    )
+    result = await db.execute(stmt)
+    return int(result.scalar_one() or 0)
 
 
 _SPOTS_CACHE_TTL_SEC = 5.0

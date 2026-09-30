@@ -10,6 +10,7 @@ from app.models.enums import (
     EventCategory,
     EventSlot,
     EventVisibility,
+    GenderCategory,
     MemberRegistrationMode,
     PaymentStatus,
     PaymentType,
@@ -25,6 +26,8 @@ class AdminEventCreate(BaseModel):
     short_desc: Optional[str] = None
     long_desc: Optional[str] = None
     category: Optional[EventCategory] = None
+    subcategory: Optional[str] = Field(default=None, max_length=100)
+    gender_category: GenderCategory = GenderCategory.OPEN
     coordinator: Optional[str] = None
     coord_contact: Optional[str] = None
     fee: Optional[Decimal] = None
@@ -53,6 +56,8 @@ class AdminEventUpdate(BaseModel):
     short_desc: Optional[str] = None
     long_desc: Optional[str] = None
     category: Optional[EventCategory] = None
+    subcategory: Optional[str] = Field(default=None, max_length=100)
+    gender_category: Optional[GenderCategory] = None
     coordinator: Optional[str] = None
     coord_contact: Optional[str] = None
     fee: Optional[Decimal] = None
@@ -68,6 +73,7 @@ class AdminEventUpdate(BaseModel):
 
 class AdminRegistrationRulesUpdate(BaseModel):
     registration_mode: Optional[RegistrationMode] = None
+    gender_category: Optional[GenderCategory] = None
     team_min_size: Optional[int] = Field(default=None, ge=1)
     team_max_size: Optional[int] = Field(default=None, ge=1)
     required_member_count: Optional[int] = Field(default=None, ge=1)

@@ -5,12 +5,13 @@ from typing import Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.enums import (
+    Gender,
     TeamMemberEntrySource,
     TeamMemberRole,
     TeamMemberStatus,
     TeamStatus,
 )
-from app.schemas.event_content import FieldResponseInput
+from app.schemas.event_content import FieldResponseInput, FieldResponseOut
 
 
 class TeamCreateRequest(BaseModel):
@@ -36,6 +37,8 @@ class TeamMemberOut(BaseModel):
     contact_email: str | None = None
     college_name: str | None = None
     year_of_study: str | None = None
+    gender: Optional[Gender] = None
+    field_responses: list[FieldResponseOut] = []
 
 
 class TeamOut(BaseModel):
@@ -93,6 +96,16 @@ class JoinTeamResponse(BaseModel):
     registration_id: uuid.UUID | None = None
 
 
+class RosterMemberInput(BaseModel):
+    full_name: str = Field(min_length=1, max_length=200)
+    phone: str = Field(min_length=1, max_length=20)
+    contact_email: Optional[str] = Field(default=None, max_length=255)
+    college_name: Optional[str] = Field(default=None, max_length=200)
+    year_of_study: Optional[str] = Field(default=None, max_length=50)
+    gender: Optional[Gender] = None
+    field_responses: list[FieldResponseInput] = []
+
+
 class RosterAddRequest(BaseModel):
     """Leader adds a mandatory member or substitute — linked account and/or details."""
 
@@ -103,6 +116,7 @@ class RosterAddRequest(BaseModel):
     contact_email: Optional[str] = Field(default=None, max_length=255)
     college_name: Optional[str] = Field(default=None, max_length=200)
     year_of_study: Optional[str] = Field(default=None, max_length=50)
+    gender: Optional[Gender] = None
     field_responses: list[FieldResponseInput] = []
 
     @model_validator(mode="after")

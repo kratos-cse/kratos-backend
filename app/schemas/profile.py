@@ -1,6 +1,9 @@
 import uuid
+from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from app.models.enums import Gender
 
 
 class ProfileOut(BaseModel):
@@ -13,6 +16,7 @@ class ProfileOut(BaseModel):
     college_name: str | None = None
     department: str | None = None
     year_of_study: str | None = None
+    gender: Optional[Gender] = None
 
 
 class ProfileUpdateRequest(BaseModel):
@@ -24,3 +28,4 @@ class ProfileUpdateRequest(BaseModel):
     college_name: str | None = Field(default=None, max_length=200)
     department: str | None = Field(default=None, max_length=200)
     year_of_study: str | None = Field(default=None, max_length=50)
+    gender: Optional[Gender] = None

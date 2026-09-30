@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import ORJSONResponse
+from starlette.middleware.gzip import GZipMiddleware
 
 from app.api.v1.router import api_router
 from app.core.config import settings
@@ -16,6 +17,7 @@ app = FastAPI(
         "Deferred: WebSocket teams, multi-event cart."
     ),
     version="0.1.0",
+    default_response_class=ORJSONResponse,
 )
 
 app.add_middleware(
@@ -25,21 +27,33 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.add_middleware(RequestLoggingMiddleware)
 
 app.include_router(api_router, prefix="/api/v1")
 
 
+@app.get("/", tags=["Health"])
+async def root():
+    return {
+        "status": "ok",
+        "service": "KRATOS'26 API",
+        "version": "0.1.0",
+        "docs": "/docs",
+        "health": "/health",
+    }
+
+
 @app.exception_handler(AppError)
-async def app_error_handler(_request: Request, exc: AppError) -> JSONResponse:
-    return JSONResponse(
+async def app_error_handler(_request: Request, exc: AppError) -> ORJSONResponse:
+    return ORJSONResponse(
         status_code=exc.status_code,
         content={"error": {"code": exc.code, "message": exc.message}},
     )
 
 
 @app.exception_handler(HTTPException)
-async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONResponse:
+async def http_exception_handler(_request: Request, exc: HTTPException) -> ORJSONResponse:
     detail = exc.detail
     if isinstance(detail, str):
         message = detail
@@ -53,7 +67,7 @@ async def http_exception_handler(_request: Request, exc: HTTPException) -> JSONR
     else:
         message = str(detail)
         code = http_code_from_detail(exc.status_code, message)
-    return JSONResponse(
+    return ORJSONResponse(
         status_code=exc.status_code,
         content={"error": {"code": code, "message": message}},
     )

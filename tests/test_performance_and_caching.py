@@ -35,3 +35,28 @@ def test_spots_cache_invalidation():
     _spots_cache[eid] = (time.monotonic() + 5.0, 3)
     invalidate_spots_cache(eid)
     assert eid not in _spots_cache
+
+
+def test_token_cache_invalidation():
+    from app.core.security import _token_cache, create_access_token, decode_token, revoke_token
+    from app.db.session import is_db_configured
+
+    uid = uuid.uuid4()
+    token, _ = create_access_token(uid)
+    payload = decode_token(token)
+    assert payload["sub"] == str(uid)
+    assert token in _token_cache
+
+    # Revoking should evict from cache and raise 401
+    revoke_token(payload["jti"])
+    assert token not in _token_cache
+
+    import pytest
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc_info:
+        decode_token(token)
+    assert exc_info.value.status_code == 401
+
+    # is_db_configured returns boolean
+    assert isinstance(is_db_configured(), bool)
+

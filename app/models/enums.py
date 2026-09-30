@@ -1,6 +1,19 @@
 import enum
 
 
+class Gender(str, enum.Enum):
+    MALE = "MALE"
+    FEMALE = "FEMALE"
+    OTHER = "OTHER"
+
+
+class GenderCategory(str, enum.Enum):
+    OPEN = "OPEN"
+    MALE_ONLY = "MALE_ONLY"
+    FEMALE_ONLY = "FEMALE_ONLY"
+    MIXED = "MIXED"
+
+
 class EventVisibility(str, enum.Enum):
     PUBLISHED = "PUBLISHED"
     UNPUBLISHED = "UNPUBLISHED"

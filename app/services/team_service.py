@@ -27,6 +27,8 @@ from app.models.admin import AdminUser
 from app.models.enums import (
     EventRegistrationStatus,
     EventVisibility,
+    Gender,
+    GenderCategory,
     MemberRegistrationMode,
     RegistrationFieldScope,
     RegistrationStatus,
@@ -142,6 +144,7 @@ async def _to_member_out(member: TeamMember) -> dict:
         or (profile.college_name if profile else None),
         "year_of_study": getattr(member, "year_of_study", None)
         or (profile.year_of_study if profile else None),
+        "gender": getattr(member, "gender", None) or (profile.gender if profile else None),
     }
 
 
@@ -529,6 +532,20 @@ async def add_roster_member(
         if not payload.full_name or not payload.phone:
             raise AppError(ROSTER_INVALID, "full_name and phone are required for leader-entered members", status_code=400)
 
+    member_gender = payload.gender if entry_source == TeamMemberEntrySource.LEADER_ENTERED else (member_profile.gender if member_profile else None)
+    gender_category = getattr(rules, "gender_category", GenderCategory.OPEN)
+    if gender_category == GenderCategory.MALE_ONLY and member_gender != Gender.MALE:
+        raise AppError("GENDER_RESTRICTION", "This event is restricted to male participants", status_code=400)
+    elif gender_category == GenderCategory.FEMALE_ONLY and member_gender != Gender.FEMALE:
+        raise AppError("GENDER_RESTRICTION", "This event is restricted to female participants", status_code=400)
+    elif gender_category == GenderCategory.MIXED and total == 2:
+        leader_member = next((m for m in active if m.role == TeamMemberRole.LEADER), None)
+        if leader_member:
+            leader_prof = leader_member.profile if "profile" in leader_member.__dict__ else None
+            leader_gender = getattr(leader_member, "gender", None) or (leader_prof.gender if leader_prof else None)
+            if leader_gender and member_gender and leader_gender == member_gender:
+                raise AppError("GENDER_RESTRICTION", "Mixed duo event requires one male and one female participant", status_code=400)
+
     pending_member = TeamMember(
         team_id=team.id,
         event_id=team.event_id,
@@ -541,6 +558,7 @@ async def add_roster_member(
         contact_email=payload.contact_email if entry_source == TeamMemberEntrySource.LEADER_ENTERED else None,
         college_name=payload.college_name if entry_source == TeamMemberEntrySource.LEADER_ENTERED else None,
         year_of_study=payload.year_of_study if entry_source == TeamMemberEntrySource.LEADER_ENTERED else None,
+        gender=member_gender,
     )
 
     field_pairs = await validate_and_prepare_responses(
@@ -568,8 +586,7 @@ async def add_roster_member(
             raise AppError(TEAM_SUBSTITUTE_LIMIT, "No substitute slots remaining", status_code=409)
         raise AppError(TEAM_MANDATORY_FULL, "Mandatory roster is already full", status_code=409)
 
-    if member.profile_id:
-        await qr_service.generate_for_team_member(db, member.id)
+    await qr_service.generate_for_team_member(db, member.id)
 
     team_became_complete = False
     if mandatory_met(active, rules) and team.status == TeamStatus.PAID:

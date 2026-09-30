@@ -11,6 +11,7 @@ from app.models.enums import (
     EventRegistrationStatus,
     EventSlot,
     EventVisibility,
+    GenderCategory,
     MemberRegistrationMode,
     RegistrationAvailability,
     RegistrationMode,
@@ -28,6 +29,8 @@ class EventListItem(BaseModel):
     tagline: str | None = None
     short_desc: str | None
     category: EventCategory | None
+    subcategory: str | None = None
+    gender_category: GenderCategory = GenderCategory.OPEN
     fee: Decimal | None
     venue: str | None
     starts_at: datetime | None
@@ -57,6 +60,8 @@ class EventDetail(BaseModel):
     short_desc: str | None
     long_desc: str | None
     category: EventCategory | None
+    subcategory: str | None = None
+    gender_category: GenderCategory = GenderCategory.OPEN
     coordinator: str | None = None
     coord_contact: str | None = None
     content_sections: list[ContentSectionOut] = []

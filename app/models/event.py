@@ -14,6 +14,7 @@ from app.models.enums import (
     EventRegistrationStatus,
     EventSlot,
     EventVisibility,
+    GenderCategory,
     MemberRegistrationMode,
     RegistrationMode,
 )
@@ -31,6 +32,13 @@ class Event(Base):
     category: Mapped[Optional[EventCategory]] = mapped_column(
         Enum(EventCategory, name="event_category", native_enum=True),
         nullable=True,
+    )
+    subcategory: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    gender_category: Mapped[GenderCategory] = mapped_column(
+        Enum(GenderCategory, name="gender_category", native_enum=True),
+        default=GenderCategory.OPEN,
+        server_default="OPEN",
+        nullable=False,
     )
     coordinator: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     coord_contact: Mapped[Optional[str]] = mapped_column(String, nullable=True)
@@ -88,6 +96,12 @@ class EventRegistrationRule(Base):
     )
     allow_team_invite_flow: Mapped[bool] = mapped_column(default=False, server_default="false")
     requires_qr_checkin: Mapped[bool] = mapped_column(default=True, server_default="true")
+    gender_category: Mapped[GenderCategory] = mapped_column(
+        Enum(GenderCategory, name="gender_category", native_enum=True),
+        default=GenderCategory.OPEN,
+        server_default="OPEN",
+        nullable=False,
+    )
     capacity_type: Mapped[CapacityType] = mapped_column(
         Enum(CapacityType, name="capacity_type"), default=CapacityType.PARTICIPANTS, nullable=False
     )

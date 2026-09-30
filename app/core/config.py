@@ -23,6 +23,19 @@ class Settings(BaseSettings):
     # --- Database (filled in by team lead once Railway Postgres exists) ---
     DATABASE_URL: str = ""
 
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def resolve_database_url(cls, v: str) -> str:
+        if v and str(v).strip():
+            return str(v).strip()
+        import os
+        return (
+            os.environ.get("DATABASE_URL")
+            or os.environ.get("POSTGRESQLCONNSTR_DATABASE_URL")
+            or os.environ.get("CUSTOMCONNSTR_DATABASE_URL")
+            or ""
+        ).strip()
+
     # --- Google OAuth (filled in by team lead) ---
     GOOGLE_CLIENT_ID: str = ""
     GOOGLE_CLIENT_SECRET: str = ""
@@ -87,6 +100,8 @@ class Settings(BaseSettings):
             url = url.replace("postgres://", "postgresql://", 1)
         if url.startswith("postgresql://") and "+asyncpg" not in url:
             url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        if "sslmode=" in url:
+            url = url.replace("sslmode=", "ssl=")
         return url
 
 
