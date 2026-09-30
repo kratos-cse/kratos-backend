@@ -27,7 +27,7 @@ Scope: Event catalogue, category lock, tagline, concurrency, WhatsApp, performan
 
 **0006** (`0006_event_category_tagline_uniques.py`):
 
-1. Create PG enum `event_category` (TECHNICAL, PLAYGROUND, SPARK, ONLINE, CULTURAL)
+1. Create PG enum `event_category` (TECHNICAL, PLAYGROUND, SPARK, ONLINE, CULTURAL; `CULTURAL` was later renamed `TITLE_EVENT` in migration 0013)
 2. Normalize existing category strings (SPORTS→PLAYGROUND; unknown → NULL — not invented)
 3. Add `events.tagline` (nullable)
 4. Cast `events.category` to enum

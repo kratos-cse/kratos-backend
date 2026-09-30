@@ -37,9 +37,13 @@ def test_event_category_values_locked():
         "PLAYGROUND",
         "SPARK",
         "ONLINE",
-        "CULTURAL",
+        "TITLE_EVENT",
     }
     assert "SPORTS" not in {c.value for c in EventCategory}
+
+
+def test_legacy_cultural_category_maps_to_title_event():
+    assert EventCategory("CULTURAL") is EventCategory.TITLE_EVENT
 
 
 def test_registration_open_requires_published_and_open():

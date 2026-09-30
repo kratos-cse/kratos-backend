@@ -28,7 +28,14 @@ class EventCategory(str, enum.Enum):
     PLAYGROUND = "PLAYGROUND"
     SPARK = "SPARK"
     ONLINE = "ONLINE"
-    CULTURAL = "CULTURAL"
+    TITLE_EVENT = "TITLE_EVENT"
+
+    @classmethod
+    def _missing_(cls, value):
+        # Clients that haven't redeployed still send the old name.
+        if value == "CULTURAL":
+            return cls.TITLE_EVENT
+        return None
 
 
 class EventSlot(str, enum.Enum):
