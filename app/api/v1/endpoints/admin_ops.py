@@ -4,15 +4,17 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps_admin import (
     get_current_active_admin,
     require_permission,
+    require_scoped_event_access,
     require_super_admin,
 )
+from app.core.permissions import EVENT_EDIT, EVENT_READ
 from app.db.session import get_db
 from app.models.admin import AdminUser
 from app.models.enums import (
@@ -39,7 +41,10 @@ from app.schemas.admin_ops import (
     AdminTeamUpdate,
     TransferLeadershipBody,
 )
+from app.schemas.event_assignment import EventAssignmentCreate
 from app.services import admin_delete_service, admin_ops_service as ops
+from app.services import event_assignment_service as assignment_svc
+from app.services.event_access_service import require_event_access, scoped_event_ids
 from app.services.registration_service import _already_registered
 from app.services.event_service import invalidate_events_list_cache, invalidate_spots_cache
 from app.services.event_state import (
@@ -58,16 +63,17 @@ def _success(data):
 @router.get("/dashboard")
 async def admin_dashboard(
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(get_current_active_admin),
+    admin: AdminUser = Depends(require_permission("dashboard")),
 ):
-    return _success(await ops.dashboard_payload(db))
+    scoped = await scoped_event_ids(db, admin)
+    return _success(await ops.dashboard_payload(db, scoped_event_ids=scoped))
 
 
 @router.post("/events", status_code=status.HTTP_201_CREATED)
 async def create_event(
     body: AdminEventCreate,
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_permission("event-management")),
+    _: AdminUser = Depends(require_permission(EVENT_EDIT)),
 ):
     event = Event(
         name=body.name,
@@ -123,13 +129,19 @@ async def create_event(
 @router.get("/events")
 async def list_admin_events(
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(get_current_active_admin),
+    admin: AdminUser = Depends(require_permission(EVENT_READ)),
 ):
-    result = await db.execute(
+    scoped = await scoped_event_ids(db, admin)
+    q = (
         select(Event, EventRegistrationRule)
         .outerjoin(EventRegistrationRule, EventRegistrationRule.event_id == Event.id)
         .order_by(Event.starts_at.nulls_last())
     )
+    if scoped is not None:
+        if not scoped:
+            return _success([])
+        q = q.where(Event.id.in_(scoped))
+    result = await db.execute(q)
     items = []
     for event, rules in result.all():
         if not rules:
@@ -143,10 +155,19 @@ async def list_admin_events(
 async def get_admin_event(
     event_id: UUID,
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(get_current_active_admin),
+    _: AdminUser = Depends(require_scoped_event_access(EVENT_READ)),
 ):
     event, rules = await ops.get_event_with_rules(db, event_id)
     return _success(await ops.event_to_dict_with_state(db, event, rules, include_config_summary=True))
+
+
+@router.get("/events/{event_id}/metrics")
+async def get_event_metrics(
+    event_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _: AdminUser = Depends(require_scoped_event_access(EVENT_READ)),
+):
+    return _success(await ops.event_operations_metrics(db, event_id))
 
 
 @router.patch("/events/{event_id}")
@@ -154,7 +175,7 @@ async def patch_event(
     event_id: UUID,
     body: AdminEventUpdate,
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_permission("event-management")),
+    _: AdminUser = Depends(require_scoped_event_access(EVENT_EDIT, write=True)),
 ):
     event, rules = await ops.get_event_with_rules(db, event_id)
     data = body.model_dump(exclude_unset=True)
@@ -176,7 +197,7 @@ async def patch_registration_rules(
     event_id: UUID,
     body: AdminRegistrationRulesUpdate,
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_permission("event-management")),
+    _: AdminUser = Depends(require_scoped_event_access(EVENT_EDIT, write=True)),
 ):
     event, rules = await ops.get_event_with_rules(db, event_id)
     data = body.model_dump(exclude_unset=True)
@@ -205,7 +226,7 @@ async def patch_registration_rules(
 async def publish_admin_event(
     event_id: UUID,
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_permission("event-management")),
+    _: AdminUser = Depends(require_super_admin),
 ):
     event, rules = await ops.get_event_with_rules(db, event_id)
     publish_event(event)
@@ -220,7 +241,7 @@ async def publish_admin_event(
 async def unpublish_admin_event(
     event_id: UUID,
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_permission("event-management")),
+    _: AdminUser = Depends(require_super_admin),
 ):
     event, rules = await ops.get_event_with_rules(db, event_id)
     unpublish_event(event)
@@ -235,7 +256,7 @@ async def unpublish_admin_event(
 async def open_event_registration(
     event_id: UUID,
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_permission("event-management")),
+    _: AdminUser = Depends(require_super_admin),
 ):
     event, rules = await ops.get_event_with_rules(db, event_id)
     open_registration(event)
@@ -250,7 +271,7 @@ async def open_event_registration(
 async def close_event_registration(
     event_id: UUID,
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_permission("event-management")),
+    _: AdminUser = Depends(require_super_admin),
 ):
     event, rules = await ops.get_event_with_rules(db, event_id)
     close_registration(event)
@@ -259,6 +280,48 @@ async def close_event_registration(
     invalidate_events_list_cache()
     invalidate_spots_cache(event.id)
     return _success(await ops.event_to_dict_with_state(db, event, rules))
+
+
+@router.get("/event-coordinators")
+async def list_assignable_event_coordinators(
+    db: AsyncSession = Depends(get_db),
+    _: AdminUser = Depends(require_permission("event-assignment-management")),
+):
+    return _success(await assignment_svc.list_assignable_event_coordinators(db))
+
+
+@router.get("/events/{event_id}/assignments")
+async def list_event_admin_assignments(
+    event_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _: AdminUser = Depends(require_permission("event-assignment-management")),
+):
+    assignments = await assignment_svc.list_event_assignments(db, event_id)
+    return _success(await assignment_svc.enrich_assignments_with_user_info(db, assignments))
+
+
+@router.post("/events/{event_id}/assignments", status_code=status.HTTP_201_CREATED)
+async def create_event_admin_assignment(
+    event_id: UUID,
+    body: EventAssignmentCreate,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(require_permission("event-assignment-management")),
+):
+    assignment = await assignment_svc.create_event_assignment(
+        db, event_id, body.admin_user_id, admin.id
+    )
+    enriched = await assignment_svc.enrich_assignments_with_user_info(db, [assignment])
+    return _success(enriched[0] if enriched else assignment_svc.serialize_assignment(assignment))
+
+
+@router.delete("/events/{event_id}/assignments/{assignment_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_event_admin_assignment(
+    event_id: UUID,
+    assignment_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _: AdminUser = Depends(require_permission("event-assignment-management")),
+):
+    await assignment_svc.delete_event_assignment(db, event_id, assignment_id)
 
 
 @router.delete("/events/{event_id}")
@@ -277,8 +340,10 @@ async def list_participants(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_permission("participant-read")),
+    admin: AdminUser = Depends(require_permission("participant-read")),
 ):
+    if event_id is not None:
+        await require_event_access(db, admin, event_id, "participant-read")
     profiles, total = await ops.search_participant_profiles(
         db, q=q, event_id=event_id, skip=skip, limit=min(limit, 100)
     )
@@ -378,9 +443,16 @@ async def list_teams(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_permission("team-read")),
+    admin: AdminUser = Depends(require_permission("team-read")),
 ):
+    scoped = await scoped_event_ids(db, admin)
+    if event_id is not None:
+        await require_event_access(db, admin, event_id, "team-read")
     q = select(Team).options(selectinload(Team.event)).order_by(Team.created_at.desc())
+    if scoped is not None:
+        if not scoped:
+            return _success([])
+        q = q.where(Team.event_id.in_(scoped))
     if event_id:
         q = q.where(Team.event_id == event_id)
     if team_status:
@@ -404,17 +476,29 @@ async def list_teams(
     )
 
 
+@router.get("/teams/{team_id}")
+async def get_team_detail(
+    team_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(require_permission("team-read")),
+):
+    detail = await ops.get_admin_team_detail(db, team_id)
+    await require_event_access(db, admin, detail["event_id"], "team-read")
+    return _success(detail)
+
+
 @router.patch("/teams/{team_id}")
 async def patch_team(
     team_id: UUID,
     body: AdminTeamUpdate,
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_permission("team-edit")),
+    admin: AdminUser = Depends(require_permission("team-edit")),
 ):
     result = await db.execute(select(Team).where(Team.id == team_id))
     team = result.scalar_one_or_none()
     if not team:
         raise HTTPException(status_code=404, detail="Team not found.")
+    await require_event_access(db, admin, team.event_id, "team-edit", write=True)
     if team.status == TeamStatus.CANCELLED:
         raise HTTPException(status_code=400, detail="Cannot edit a cancelled team.")
     for field, value in body.model_dump(exclude_unset=True).items():
@@ -437,8 +521,13 @@ async def transfer_leadership(
     team_id: UUID,
     body: TransferLeadershipBody,
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_permission("leadership-transfer")),
+    admin: AdminUser = Depends(require_permission("leadership-transfer")),
 ):
+    team_result = await db.execute(select(Team).where(Team.id == team_id))
+    team = team_result.scalar_one_or_none()
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found.")
+    await require_event_access(db, admin, team.event_id, "team-edit", write=True)
     return _success(await ops.transfer_team_leadership(db, team_id, body.new_leader_profile_id))
 
 
@@ -467,23 +556,44 @@ async def list_registrations(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_permission("registration-read")),
+    admin: AdminUser = Depends(require_permission("registration-read")),
 ):
+    scoped = await scoped_event_ids(db, admin)
+    if event_id is not None:
+        await require_event_access(db, admin, event_id, "registration-read")
     q = (
         select(Registration)
         .options(*ops.ADMIN_REGISTRATION_LIST_LOAD)
         .order_by(Registration.created_at.desc())
     )
+    if scoped is not None:
+        if not scoped:
+            return _success({"items": [], "skip": skip, "limit": limit})
+        q = q.where(Registration.event_id.in_(scoped))
     if event_id:
         q = q.where(Registration.event_id == event_id)
     if reg_status:
         q = q.where(Registration.status == reg_status)
+    count_q = select(func.count()).select_from(q.subquery())
+    total = (await db.execute(count_q)).scalar_one()
     q = q.offset(skip).limit(min(limit, 100))
     result = await db.execute(q)
     registrations = result.scalars().all()
     await ops.attach_field_responses_to_registrations(db, registrations)
+    await ops.attach_participants_to_registrations(db, registrations)
     items = [ops.serialize_admin_registration(r) for r in registrations]
-    return _success({"items": items, "skip": skip, "limit": limit})
+    return _success({"items": items, "total": int(total), "skip": skip, "limit": limit})
+
+
+@router.get("/registrations/{registration_id}")
+async def get_registration_detail(
+    registration_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(require_permission("registration-read")),
+):
+    detail = await ops.get_admin_registration_detail(db, registration_id)
+    await require_event_access(db, admin, detail["event_id"], "registration-read")
+    return _success(detail)
 
 
 @router.patch("/registrations/{registration_id}")
@@ -491,12 +601,13 @@ async def patch_registration(
     registration_id: UUID,
     body: AdminRegistrationUpdate,
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_permission("registration-edit")),
+    admin: AdminUser = Depends(require_permission("registration-edit")),
 ):
     result = await db.execute(select(Registration).where(Registration.id == registration_id))
     registration = result.scalar_one_or_none()
     if not registration:
         raise HTTPException(status_code=404, detail="Registration not found.")
+    await require_event_access(db, admin, registration.event_id, "registration-edit", write=True)
     if body.status is not None:
         registration.status = body.status
     await db.commit()

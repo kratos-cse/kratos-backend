@@ -9,6 +9,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.security import get_current_user
 from app.db.session import get_db
+from app.core.permissions import admin_has_expanded_permission
 from app.models.admin import SUPER_ADMIN_ROLE_NAME, AdminUser, Role
 from app.models.user import User
 
@@ -80,7 +81,7 @@ def admin_has_permission(admin: AdminUser, *permission_keys: str) -> bool:
     if is_super_admin(admin):
         return True
     keys = admin_permission_keys(admin)
-    return any(k in keys for k in permission_keys)
+    return admin_has_expanded_permission(keys, *permission_keys)
 
 
 def require_permission(*permission_keys: str):
@@ -95,5 +96,21 @@ def require_permission(*permission_keys: str):
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have permission to perform this action.",
         )
+
+    return _dependency
+
+
+def require_scoped_event_access(permission: str, *, write: bool = False):
+    """Path param `event_id` must exist on the route."""
+
+    async def _dependency(
+        event_id: UUID,
+        db: AsyncSession = Depends(get_db),
+        current_admin: AdminUser = Depends(get_current_active_admin),
+    ) -> AdminUser:
+        from app.services.event_access_service import require_event_access
+
+        await require_event_access(db, current_admin, event_id, permission, write=write)
+        return current_admin
 
     return _dependency

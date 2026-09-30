@@ -10,6 +10,8 @@ from app.db.base import Base
 
 
 SUPER_ADMIN_ROLE_NAME = "SUPER ADMIN"
+ADMIN_ROLE_NAME = "ADMIN"
+EVENT_COORDINATOR_ROLE_NAME = "EVENT COORDINATOR"
 
 
 class Role(Base):
@@ -52,3 +54,8 @@ class AdminUser(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     role: Mapped["Role"] = relationship("Role", back_populates="admin_users")
+    event_assignments: Mapped[List["EventAdminAssignment"]] = relationship(
+        "EventAdminAssignment",
+        foreign_keys="EventAdminAssignment.admin_user_id",
+        back_populates="admin_user",
+    )

@@ -15,6 +15,9 @@ from sqlalchemy.orm import selectinload
 
 from app.models.attendance import AttendanceScan
 from app.models.enums import (
+    EventRegistrationStatus,
+    EventVisibility,
+    PaymentStatus,
     PaymentType,
     RegistrationFieldScope,
     RegistrationFieldSource,
@@ -86,31 +89,104 @@ _dashboard_cache: dict[str, Any] = {"expires_at": 0.0, "payload": None}
 def invalidate_dashboard_cache() -> None:
     _dashboard_cache["expires_at"] = 0.0
     _dashboard_cache["payload"] = None
+    _dashboard_cache["cache_key"] = None
 
 
-async def dashboard_payload(db: AsyncSession) -> dict[str, Any]:
+async def dashboard_payload(
+    db: AsyncSession,
+    *,
+    scoped_event_ids: Optional[set[uuid.UUID]] = None,
+) -> dict[str, Any]:
     now = time.monotonic()
-    if _dashboard_cache["payload"] is not None and now < float(_dashboard_cache["expires_at"] or 0):
+    cache_key = "all" if scoped_event_ids is None else f"scoped:{sorted(scoped_event_ids)}"
+    if (
+        _dashboard_cache.get("cache_key") == cache_key
+        and _dashboard_cache["payload"] is not None
+        and now < float(_dashboard_cache["expires_at"] or 0)
+    ):
         return _dashboard_cache["payload"]
 
-    events_total = (await db.execute(select(func.count()).select_from(Event))).scalar_one()
-    registrations = await status_counts(db, Registration.status, Registration)
-    teams = await status_counts(db, Team.status, Team)
-    payments = await status_counts(db, Payment.status, Payment)
+    event_filter = []
+    if scoped_event_ids is not None:
+        if not scoped_event_ids:
+            return {
+                "events_total": 0,
+                "active_events": 0,
+                "open_registrations": 0,
+                "registrations_by_status": {},
+                "teams_by_status": {},
+                "payments_by_status": {},
+                "attendance_scans_total": 0,
+                "paid_revenue_paise": 0,
+                "event_operations": [],
+                "recent_registrations": [],
+                "recent_payments": [],
+            }
+        event_filter.append(Event.id.in_(scoped_event_ids))
+
+    events_q = select(func.count()).select_from(Event)
+    if event_filter:
+        events_q = events_q.where(*event_filter)
+    events_total = (await db.execute(events_q)).scalar_one()
+
+    active_q = select(func.count()).select_from(Event).where(Event.visibility == EventVisibility.PUBLISHED)
+    if event_filter:
+        active_q = active_q.where(*event_filter)
+    active_events = (await db.execute(active_q)).scalar_one()
+
+    open_q = select(func.count()).select_from(Event).where(
+        Event.visibility == EventVisibility.PUBLISHED,
+        Event.registration_status == EventRegistrationStatus.OPEN,
+    )
+    if event_filter:
+        open_q = open_q.where(*event_filter)
+    open_registrations = (await db.execute(open_q)).scalar_one()
+
+    reg_q = select(Registration.status, func.count()).select_from(Registration).group_by(Registration.status)
+    if scoped_event_ids is not None:
+        reg_q = reg_q.where(Registration.event_id.in_(scoped_event_ids))
+    reg_result = await db.execute(reg_q)
+    registrations = {row[0].value if hasattr(row[0], "value") else str(row[0]): int(row[1]) for row in reg_result.all()}
+
+    team_q = select(Team.status, func.count()).select_from(Team).group_by(Team.status)
+    if scoped_event_ids is not None:
+        team_q = team_q.where(Team.event_id.in_(scoped_event_ids))
+    team_result = await db.execute(team_q)
+    teams = {row[0].value if hasattr(row[0], "value") else str(row[0]): int(row[1]) for row in team_result.all()}
+
+    pay_q = select(Payment.status, func.count()).select_from(Payment).group_by(Payment.status)
+    pay_result = await db.execute(pay_q)
+    payments = {row[0].value if hasattr(row[0], "value") else str(row[0]): int(row[1]) for row in pay_result.all()}
+
+    revenue_q = select(func.coalesce(func.sum(Payment.amount_paise), 0)).where(Payment.status == PaymentStatus.PAID)
+    paid_revenue_paise = int((await db.execute(revenue_q)).scalar_one())
+
     try:
         attendance_scans = (
             await db.execute(select(func.count()).select_from(AttendanceScan))
         ).scalar_one()
     except Exception:
         attendance_scans = 0
+
+    event_operations = await build_event_operations_rows(db, scoped_event_ids=scoped_event_ids)
+    recent_registrations = await recent_registration_activity(db, scoped_event_ids=scoped_event_ids, limit=8)
+    recent_payments = await recent_payment_activity(db, limit=8)
+
     payload = {
         "events_total": events_total,
+        "active_events": active_events,
+        "open_registrations": open_registrations,
         "registrations_by_status": registrations,
         "teams_by_status": teams,
         "payments_by_status": payments,
         "attendance_scans_total": attendance_scans,
+        "paid_revenue_paise": paid_revenue_paise,
+        "event_operations": event_operations,
+        "recent_registrations": recent_registrations,
+        "recent_payments": recent_payments,
     }
     _dashboard_cache["payload"] = payload
+    _dashboard_cache["cache_key"] = cache_key
     _dashboard_cache["expires_at"] = now + _DASHBOARD_CACHE_TTL_SEC
     return payload
 
@@ -821,4 +897,324 @@ def serialize_admin_registration(registration: Registration) -> dict[str, Any]:
             fr.model_dump() if hasattr(fr, "model_dump") else fr for fr in field_responses
         ],
         "created_at": registration.created_at,
+        "participant": getattr(registration, "_participant", None),
     }
+
+
+def _profile_contact_dict(profile: Profile | None) -> dict[str, Any] | None:
+    if profile is None:
+        return None
+    return {
+        "profile_id": profile.id,
+        "full_name": profile.full_name,
+        "email": profile.contact_email,
+        "phone": profile.phone,
+        "college": profile.college_name,
+        "department": profile.department,
+        "year": profile.year_of_study,
+    }
+
+
+async def attach_participants_to_registrations(
+    db: AsyncSession, registrations: list[Registration]
+) -> None:
+    if not registrations:
+        return
+    profile_ids: set[uuid.UUID] = set()
+    for r in registrations:
+        if r.profile_id:
+            profile_ids.add(r.profile_id)
+        elif r.team and r.team.leader_profile_id:
+            profile_ids.add(r.team.leader_profile_id)
+    profiles: dict[uuid.UUID, Profile] = {}
+    if profile_ids:
+        result = await db.execute(select(Profile).where(Profile.id.in_(profile_ids)))
+        profiles = {p.id: p for p in result.scalars().all()}
+    for r in registrations:
+        pid = r.profile_id or (r.team.leader_profile_id if r.team else None)
+        r._participant = _profile_contact_dict(profiles.get(pid) if pid else None)
+
+
+async def get_admin_registration_detail(db: AsyncSession, registration_id: uuid.UUID) -> dict[str, Any]:
+    result = await db.execute(
+        select(Registration)
+        .options(*ADMIN_REGISTRATION_LIST_LOAD)
+        .where(Registration.id == registration_id)
+    )
+    registration = result.scalar_one_or_none()
+    if registration is None:
+        raise HTTPException(status_code=404, detail="Registration not found.")
+    await attach_field_responses_to_registrations(db, [registration])
+    await attach_participants_to_registrations(db, [registration])
+    payload = serialize_admin_registration(registration)
+    payload["event"] = (
+        {
+            "id": registration.event.id,
+            "name": registration.event.name,
+            "category": registration.event.category,
+        }
+        if registration.event
+        else None
+    )
+    if registration.team:
+        members_result = await db.execute(
+            select(TeamMember).where(TeamMember.team_id == registration.team_id)
+        )
+        members = list(members_result.scalars().all())
+        member_ids = [m.id for m in members]
+        member_field_map: dict[uuid.UUID, list[dict[str, Any]]] = {}
+        if member_ids:
+            fr_res = await db.execute(
+                select(RegistrationFieldResponse)
+                .options(selectinload(RegistrationFieldResponse.field))
+                .where(RegistrationFieldResponse.team_member_id.in_(member_ids))
+            )
+            for fr in fr_res.scalars().all():
+                member_field_map.setdefault(fr.team_member_id, []).append(
+                    FieldResponseOut(
+                        field_id=fr.field_id,
+                        field_key=fr.field.field_key if fr.field else None,
+                        label=fr.field.label if fr.field else None,
+                        value=fr.value,
+                    ).model_dump()
+                )
+        profile_ids = {m.profile_id for m in members if m.profile_id}
+        profiles: dict[uuid.UUID, Profile] = {}
+        if profile_ids:
+            prof_res = await db.execute(select(Profile).where(Profile.id.in_(profile_ids)))
+            profiles = {p.id: p for p in prof_res.scalars().all()}
+        payload["team"]["members"] = [
+            {
+                "id": m.id,
+                "profile_id": m.profile_id,
+                "full_name": (profiles[m.profile_id].full_name if m.profile_id and m.profile_id in profiles else m.full_name),
+                "phone": (profiles[m.profile_id].phone if m.profile_id and m.profile_id in profiles else m.phone),
+                "contact_email": (
+                    profiles[m.profile_id].contact_email if m.profile_id and m.profile_id in profiles else m.contact_email
+                ),
+                "college_name": (
+                    profiles[m.profile_id].college_name if m.profile_id and m.profile_id in profiles else m.college_name
+                ),
+                "year_of_study": (
+                    profiles[m.profile_id].year_of_study if m.profile_id and m.profile_id in profiles else m.year_of_study
+                ),
+                "role": m.role,
+                "status": m.status,
+                "entry_source": m.entry_source,
+                "joined_at": m.joined_at,
+                "field_responses": member_field_map.get(m.id, []),
+            }
+            for m in members
+        ]
+    return payload
+
+
+async def get_admin_team_detail(db: AsyncSession, team_id: uuid.UUID) -> dict[str, Any]:
+    result = await db.execute(
+        select(Team).options(selectinload(Team.members)).where(Team.id == team_id)
+    )
+    team = result.scalar_one_or_none()
+    if team is None:
+        raise HTTPException(status_code=404, detail="Team not found.")
+    event_result = await db.execute(
+        select(Event).options(selectinload(Event.rules)).where(Event.id == team.event_id)
+    )
+    event = event_result.scalar_one_or_none()
+    rules = event.rules if event else None
+    summary = serialize_admin_registration_team(team, rules)
+    member_ids = [m.id for m in (team.members or [])]
+    member_field_map: dict[uuid.UUID, list[dict[str, Any]]] = {}
+    if member_ids:
+        fr_res = await db.execute(
+            select(RegistrationFieldResponse)
+            .options(selectinload(RegistrationFieldResponse.field))
+            .where(RegistrationFieldResponse.team_member_id.in_(member_ids))
+        )
+        for fr in fr_res.scalars().all():
+            member_field_map.setdefault(fr.team_member_id, []).append(
+                FieldResponseOut(
+                    field_id=fr.field_id,
+                    field_key=fr.field.field_key if fr.field else None,
+                    label=fr.field.label if fr.field else None,
+                    value=fr.value,
+                ).model_dump()
+            )
+    profile_ids = {m.profile_id for m in (team.members or []) if m.profile_id}
+    profiles: dict[uuid.UUID, Profile] = {}
+    if profile_ids:
+        prof_res = await db.execute(select(Profile).where(Profile.id.in_(profile_ids)))
+        profiles = {p.id: p for p in prof_res.scalars().all()}
+    members_payload = []
+    for m in team.members or []:
+        prof = profiles.get(m.profile_id) if m.profile_id else None
+        members_payload.append(
+            {
+                "id": m.id,
+                "profile_id": m.profile_id,
+                "full_name": prof.full_name if prof else m.full_name,
+                "phone": prof.phone if prof else m.phone,
+                "contact_email": prof.contact_email if prof else m.contact_email,
+                "college_name": prof.college_name if prof else m.college_name,
+                "year_of_study": prof.year_of_study if prof else m.year_of_study,
+                "role": m.role,
+                "status": m.status,
+                "entry_source": m.entry_source,
+                "joined_at": m.joined_at,
+                "field_responses": member_field_map.get(m.id, []),
+            }
+        )
+    leader = profiles.get(team.leader_profile_id) if team.leader_profile_id else None
+    return {
+        "id": team.id,
+        "event_id": team.event_id,
+        "event_name": event.name if event else None,
+        "name": team.name,
+        "status": team.status,
+        "leader_profile_id": team.leader_profile_id,
+        "leader": _profile_contact_dict(leader),
+        "created_at": team.created_at,
+        "active_member_count": summary["active_member_count"],
+        "required_member_count": summary["required_member_count"],
+        "substitute_count": summary["substitute_count"],
+        "team_max_size": summary["team_max_size"],
+        "mandatory_filled": summary["mandatory_filled"],
+        "substitutes_filled": summary["substitutes_filled"],
+        "members": members_payload,
+    }
+
+
+async def event_operations_metrics(db: AsyncSession, event_id: uuid.UUID) -> dict[str, Any]:
+    event, rules = await get_event_with_rules(db, event_id)
+    from app.services.event_service import spots_remaining
+
+    reg_result = await db.execute(
+        select(Registration.status, func.count())
+        .where(Registration.event_id == event_id)
+        .group_by(Registration.status)
+    )
+    reg_by_status = {
+        row[0].value if hasattr(row[0], "value") else str(row[0]): int(row[1]) for row in reg_result.all()
+    }
+    team_result = await db.execute(
+        select(Team.status, func.count()).where(Team.event_id == event_id).group_by(Team.status)
+    )
+    team_by_status = {
+        row[0].value if hasattr(row[0], "value") else str(row[0]): int(row[1]) for row in team_result.all()
+    }
+    pay_result = await db.execute(
+        select(Payment.status, func.count())
+        .join(Registration, Registration.payment_id == Payment.id)
+        .where(Registration.event_id == event_id)
+        .group_by(Payment.status)
+    )
+    pay_by_status = {
+        row[0].value if hasattr(row[0], "value") else str(row[0]): int(row[1]) for row in pay_result.all()
+    }
+    remaining = await spots_remaining(db, event, rules)
+    capacity = event.capacity
+    used = None
+    if capacity is not None and remaining is not None:
+        used = max(0, capacity - remaining)
+    return {
+        "event_id": event.id,
+        "registrations": reg_by_status,
+        "registrations_total": sum(reg_by_status.values()),
+        "teams": team_by_status,
+        "teams_total": sum(team_by_status.values()),
+        "payments": pay_by_status,
+        "capacity": capacity,
+        "capacity_used": used,
+        "spots_remaining": remaining,
+    }
+
+
+async def build_event_operations_rows(
+    db: AsyncSession, *, scoped_event_ids: Optional[set[uuid.UUID]] = None, limit: int = 50
+) -> list[dict[str, Any]]:
+    q = (
+        select(Event, EventRegistrationRule)
+        .join(EventRegistrationRule, EventRegistrationRule.event_id == Event.id)
+        .order_by(Event.starts_at.nulls_last())
+        .limit(limit)
+    )
+    if scoped_event_ids is not None:
+        q = q.where(Event.id.in_(scoped_event_ids))
+    result = await db.execute(q)
+    rows = []
+    for event, rules in result.all():
+        metrics = await event_operations_metrics(db, event.id)
+        rows.append(
+            {
+                "event_id": event.id,
+                "event_name": event.name,
+                "category": event.category,
+                "starts_at": event.starts_at,
+                "visibility": event.visibility,
+                "registration_status": event.registration_status,
+                "registrations_confirmed": metrics["registrations"].get("CONFIRMED", 0),
+                "registrations_pending": metrics["registrations"].get("PENDING", 0),
+                "teams_complete": metrics["teams"].get("COMPLETE", 0),
+                "teams_forming": metrics["teams"].get("FORMING", 0),
+                "payments_paid": metrics["payments"].get("PAID", 0),
+                "payments_pending": metrics["payments"].get("CREATED", 0),
+                "capacity_used": metrics["capacity_used"],
+                "capacity": metrics["capacity"],
+            }
+        )
+    return rows
+
+
+async def recent_registration_activity(
+    db: AsyncSession, *, scoped_event_ids: Optional[set[uuid.UUID]] = None, limit: int = 8
+) -> list[dict[str, Any]]:
+    q = (
+        select(Registration)
+        .options(selectinload(Registration.event), selectinload(Registration.team))
+        .order_by(Registration.created_at.desc())
+        .limit(limit)
+    )
+    if scoped_event_ids is not None:
+        q = q.where(Registration.event_id.in_(scoped_event_ids))
+    result = await db.execute(q)
+    items = []
+    for r in result.scalars().all():
+        label = r.event.name if r.event else "Event"
+        if r.team:
+            detail = f"Team {r.team.name} registered"
+        else:
+            detail = "New registration"
+        items.append(
+            {
+                "registration_id": r.id,
+                "event_id": r.event_id,
+                "event_name": label,
+                "summary": f"{label} — {detail}",
+                "status": r.status,
+                "created_at": r.created_at,
+            }
+        )
+    return items
+
+
+async def recent_payment_activity(db: AsyncSession, limit: int = 8) -> list[dict[str, Any]]:
+    q = (
+        select(Payment, Registration, Event.name)
+        .outerjoin(Registration, Registration.payment_id == Payment.id)
+        .outerjoin(Event, Event.id == Registration.event_id)
+        .order_by(Payment.created_at.desc())
+        .limit(limit)
+    )
+    result = await db.execute(q)
+    items = []
+    for payment, _reg, event_name in result.all():
+        items.append(
+            {
+                "payment_id": payment.id,
+                "event_name": event_name or "Unknown event",
+                "summary": f"{event_name or 'Payment'} — {payment.status.value if hasattr(payment.status, 'value') else payment.status}",
+                "status": payment.status,
+                "amount_paise": payment.amount_paise,
+                "created_at": payment.created_at,
+            }
+        )
+    return items
