@@ -3,6 +3,7 @@
 import asyncio
 from email import encoders
 from email.message import EmailMessage
+from email.mime.application import MIMEApplication
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -17,6 +18,7 @@ from app.core.config import settings
 logger = logging.getLogger("email_service")
 
 InlineImage = tuple[str, str, bytes]  # (content_id, mime_type, data)
+Attachment = tuple[str, str, bytes]   # (filename, mime_type, data)
 
 
 def _from_address() -> str:
@@ -35,30 +37,57 @@ async def send_email(
     text_body: str,
     html_body: Optional[str] = None,
     inline_images: Optional[Sequence[InlineImage]] = None,
+    attachments: Optional[Sequence[Attachment]] = None,
 ) -> tuple[bool, str | None]:
     """Send one email through SMTP without blocking the event loop."""
     if not settings.SMTP_HOST or not settings.SMTP_FROM:
         return False, "SMTP not configured (SMTP_HOST / SMTP_FROM missing)"
 
-    if inline_images:
-        message = MIMEMultipart("related")
+    if inline_images or attachments:
+        message = MIMEMultipart("mixed" if attachments else "related")
         message["From"] = _from_address()
         message["To"] = to_email
         message["Subject"] = subject
 
-        alt = MIMEMultipart("alternative")
-        alt.attach(MIMEText(text_body, "plain", "utf-8"))
-        if html_body:
-            alt.attach(MIMEText(html_body, "html", "utf-8"))
-        message.attach(alt)
+        # If we have attachments AND inline images, wrap inline images in related multipart
+        if attachments and inline_images:
+            related_container = MIMEMultipart("related")
+            alt = MIMEMultipart("alternative")
+            alt.attach(MIMEText(text_body, "plain", "utf-8"))
+            if html_body:
+                alt.attach(MIMEText(html_body, "html", "utf-8"))
+            related_container.attach(alt)
 
-        for cid, mime, data in inline_images:
-            subtype = mime.split("/")[-1] if "/" in mime else "png"
-            img = MIMEImage(data, _subtype=subtype)
-            img.add_header("Content-ID", f"<{cid}>")
-            img.add_header("Content-Disposition", "inline", filename=f"{cid}.png")
-            encoders.encode_base64(img)
-            message.attach(img)
+            for cid, mime, data in inline_images:
+                subtype = mime.split("/")[-1] if "/" in mime else "png"
+                img = MIMEImage(data, _subtype=subtype)
+                img.add_header("Content-ID", f"<{cid}>")
+                img.add_header("Content-Disposition", "inline", filename=f"{cid}.png")
+                encoders.encode_base64(img)
+                related_container.attach(img)
+
+            message.attach(related_container)
+        else:
+            alt = MIMEMultipart("alternative")
+            alt.attach(MIMEText(text_body, "plain", "utf-8"))
+            if html_body:
+                alt.attach(MIMEText(html_body, "html", "utf-8"))
+            message.attach(alt)
+
+            if inline_images:
+                for cid, mime, data in inline_images:
+                    subtype = mime.split("/")[-1] if "/" in mime else "png"
+                    img = MIMEImage(data, _subtype=subtype)
+                    img.add_header("Content-ID", f"<{cid}>")
+                    img.add_header("Content-Disposition", "inline", filename=f"{cid}.png")
+                    encoders.encode_base64(img)
+                    message.attach(img)
+
+        if attachments:
+            for filename, mime, data in attachments:
+                part = MIMEApplication(data, Name=filename)
+                part["Content-Disposition"] = f'attachment; filename="{filename}"'
+                message.attach(part)
     else:
         message = EmailMessage()
         message["From"] = _from_address()

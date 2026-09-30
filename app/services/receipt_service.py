@@ -52,6 +52,7 @@ def generate_qr_png_bytes(data: str) -> bytes:
     qr.make(fit=True)
     img = qr.make_image(fill_color="black", back_color="white")
     stream = io.BytesIO()
+    # pyrefly: ignore [unexpected-keyword]
     img.save(stream, format="PNG")
     return stream.getvalue()
 
@@ -106,91 +107,255 @@ def _default_venue(ctx: dict[str, Any]) -> str:
 
 
 def render_pdf_receipt(ctx: dict[str, Any]) -> bytes:
-    """Render a KRATOS'26 registration receipt card as PDF (in memory only)."""
+    """Render an elegant, executive-grade KRATOS'26 registration receipt & pass as PDF."""
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=letter)
-    width, height = letter
-    margin = 54
-    card_w = width - margin * 2
-    y = height - margin
+    width, height = letter  # 612 x 792 pt
+    margin = 36
+    card_w = width - margin * 2  # 540 pt
+    card_h = 720
+    card_left = margin
+    card_top = height - margin  # 756 pt
+    card_bottom = card_top - card_h  # 36 pt
 
-    c.setFillColorRGB(0.06, 0.09, 0.16)
-    c.setFont("Helvetica-Bold", 20)
-    c.drawCentredString(width / 2, y, "Registration Confirmed!")
-    y -= 22
-    c.setFont("Helvetica", 10)
-    c.setFillColorRGB(0.71, 0.76, 0.84)
-    c.drawCentredString(width / 2, y, "Your registration for KRATOS'26 has been successfully processed")
-    y -= 28
+    # 1. Page Background
+    c.setFillColorRGB(0.06, 0.09, 0.16)  # #0f172a
+    c.rect(0, 0, width, height, fill=1, stroke=0)
 
-    card_top = y
-    card_h = 420
+    # 2. Main White Card Container
     c.setFillColorRGB(1, 1, 1)
-    c.roundRect(margin, card_top - card_h, card_w, card_h, 10, fill=1, stroke=0)
+    c.roundRect(card_left, card_bottom, card_w, card_h, 12, fill=1, stroke=0)
 
-    ty = card_top - 28
+    # 3. Top Accent Bar
+    c.setFillColorRGB(0.73, 0.11, 0.11)  # #b91c1c Crimson
+    c.rect(card_left, card_top - 6, card_w, 6, fill=1, stroke=0)
+
+    # 4. Institutional Header Banner
+    header_h = 76
+    header_y = card_top - 6 - header_h
+    c.setFillColorRGB(0.96, 0.97, 0.98)  # #f1f5f9
+    c.rect(card_left, header_y, card_w, header_h, fill=1, stroke=0)
+
+    # Institution Logos & Centered Header Text
+    from pathlib import Path
+    assets_dir = Path(__file__).resolve().parent.parent / "assets" / "kratos"
+    lion_logo = assets_dir / "lion-mark-opt.png" if (assets_dir / "lion-mark-opt.png").is_file() else assets_dir / "lion-mark.png"
+    cse_logo = assets_dir / "cse-logo-opt.png" if (assets_dir / "cse-logo-opt.png").is_file() else assets_dir / "CSE-logo_black.png"
+
+    # Left Logo: KRATOS Lion Mark
+    if lion_logo.is_file():
+        c.drawImage(str(lion_logo), card_left + 16, header_y + 16, width=34, height=44, mask="auto")
+
+    # Right Logo: Department of CSE
+    if cse_logo.is_file():
+        c.drawImage(str(cse_logo), card_left + card_w - 16 - 44, header_y + 17, width=44, height=42, mask="auto")
+
+    # Centered Hierarchy
+    c.setFillColorRGB(0.58, 0.10, 0.10)  # Dark Red
+    c.setFont("Helvetica-Bold", 13.5)
+    c.drawCentredString(width / 2, header_y + 49, "KRATOS'26 TECHNICAL SYMPOSIUM")
+
+    c.setFillColorRGB(0.18, 0.23, 0.31)  # Slate Dark
+    c.setFont("Helvetica-Bold", 8.5)
+    c.drawCentredString(width / 2, header_y + 33, "DEPARTMENT OF COMPUTER SCIENCE AND ENGINEERING")
+
+    c.setFont("Helvetica", 8)
+    c.setFillColorRGB(0.39, 0.45, 0.55)
+    c.drawCentredString(width / 2, header_y + 19, "Easwari Engineering College (Autonomous), Ramapuram, Chennai - 600089")
+
+    # Thin line below header
+    c.setStrokeColorRGB(0.88, 0.91, 0.94)
+    c.setLineWidth(1)
+    c.line(card_left, header_y, card_left + card_w, header_y)
+
+    # 5. Title & Status Badge Bar
+    bar_y = header_y - 34
     c.setFillColorRGB(0.06, 0.09, 0.16)
-    c.setFont("Helvetica-Bold", 16)
-    c.drawCentredString(width / 2, ty, "KRATOS'26")
-    ty -= 14
-    c.setFont("Helvetica", 9)
-    c.setFillColorRGB(0.45, 0.5, 0.58)
-    c.drawCentredString(width / 2, ty, "Technical Symposium")
-    ty -= 16
-    c.setFont("Helvetica-Bold", 10)
-    c.drawCentredString(width / 2, ty, "REGISTRATION RECEIPT")
+    c.setFont("Helvetica-Bold", 13)
+    c.drawString(card_left + 20, bar_y + 10, "OFFICIAL REGISTRATION RECEIPT")
 
-    ty -= 22
-    c.setFillColorRGB(0.73, 0.11, 0.11)
-    c.rect(margin + 12, ty - 34, card_w - 24, 34, fill=1, stroke=0)
-    c.setFillColorRGB(1, 1, 1)
-    c.setFont("Helvetica-Bold", 8)
-    c.drawCentredString(width / 2, ty - 12, "VENUE")
-    c.setFont("Helvetica-Bold", 10)
-    c.drawCentredString(width / 2, ty - 26, _default_venue(ctx)[:60])
+    # Green Confirmed Badge
+    badge_w = 124
+    badge_h = 20
+    badge_x = card_left + card_w - 20 - badge_w
+    badge_y = bar_y + 8
+    c.setFillColorRGB(0.86, 0.97, 0.91)  # #dcfce7
+    c.roundRect(badge_x, badge_y, badge_w, badge_h, 4, fill=1, stroke=0)
+    c.setFillColorRGB(0.09, 0.52, 0.28)  # #15803d
+    c.setFont("Helvetica-Bold", 8.5)
+    c.drawCentredString(badge_x + badge_w / 2, badge_y + 6, "[ CONFIRMED & PAID ]")
 
-    ty -= 52
-    c.setFillColorRGB(0.1, 0.1, 0.12)
-    c.setFont("Helvetica", 10)
-    details = [
-        ("Payment ID", ctx.get("razorpay_payment_id") or str(ctx.get("payment_id", ""))[:20]),
-        ("Registration Date", ctx["issued_at_formatted"]),
-        ("Status", "Confirmed"),
-        ("Receipt", ctx["receipt_number"]),
+    # 6. Metadata Strip (Receipt No, Date, Payment ID)
+    meta_box_y = bar_y - 32
+    c.setStrokeColorRGB(0.88, 0.91, 0.94)
+    c.setFillColorRGB(0.98, 0.98, 0.99)
+    c.roundRect(card_left + 20, meta_box_y, card_w - 40, 26, 4, fill=1, stroke=1)
+
+    c.setFont("Helvetica", 8)
+    c.setFillColorRGB(0.45, 0.50, 0.58)
+    c.drawString(card_left + 28, meta_box_y + 9, "RECEIPT NO:")
+    c.setFont("Helvetica-Bold", 8.5)
+    c.setFillColorRGB(0.06, 0.09, 0.16)
+    c.drawString(card_left + 90, meta_box_y + 9, str(ctx.get("receipt_number", "—")))
+
+    c.setFont("Helvetica", 8)
+    c.setFillColorRGB(0.45, 0.50, 0.58)
+    c.drawString(card_left + 225, meta_box_y + 9, "DATE:")
+    c.setFont("Helvetica-Bold", 8.5)
+    c.setFillColorRGB(0.06, 0.09, 0.16)
+    c.drawString(card_left + 258, meta_box_y + 9, str(ctx.get("issued_at_formatted", "—"))[:22])
+
+    c.setFont("Helvetica", 8)
+    c.setFillColorRGB(0.45, 0.50, 0.58)
+    c.drawString(card_left + 380, meta_box_y + 9, "PAYMENT ID:")
+    c.setFont("Helvetica-Bold", 8.5)
+    c.setFillColorRGB(0.06, 0.09, 0.16)
+    c.drawString(card_left + 446, meta_box_y + 9, str(ctx.get("razorpay_payment_id") or ctx.get("payment_id", "—"))[:14])
+
+    # 7. Content Columns: Left (Details) & Right (QR Code Pass)
+    content_top = meta_box_y - 16
+    left_w = 310
+    right_w = 170
+    left_x = card_left + 20
+    right_x = card_left + card_w - 20 - right_w
+
+    curr_y = content_top
+
+    import textwrap
+
+    def draw_section_box(title: str, items: list[tuple[str, Any]], start_y: float, box_w: float = left_w) -> float:
+        c.setFillColorRGB(0.73, 0.11, 0.11)
+        c.setFont("Helvetica-Bold", 9)
+        c.drawString(left_x, start_y, title.upper())
+
+        c.setStrokeColorRGB(0.73, 0.11, 0.11)
+        c.setLineWidth(1)
+        c.line(left_x, start_y - 3, left_x + box_w, start_y - 3)
+
+        row_y = start_y - 16
+        for label, val in items:
+            c.setFont("Helvetica", 8)
+            c.setFillColorRGB(0.45, 0.50, 0.58)
+            c.drawString(left_x + 4, row_y, f"{label}:")
+
+            c.setFont("Helvetica-Bold", 8.5)
+            c.setFillColorRGB(0.06, 0.09, 0.16)
+            val_str = str(val or "—")
+            lines = textwrap.wrap(val_str, width=34) if len(val_str) > 34 else [val_str]
+            for idx, line in enumerate(lines[:2]):
+                c.drawString(left_x + 95, row_y, line)
+                if idx < len(lines[:2]) - 1:
+                    row_y -= 11
+            row_y -= 14
+
+        return row_y - 6
+
+    # A. Event Information
+    event_items = [
+        ("Event Name", ctx.get("event_name", "—")),
+        ("Category", ctx.get("event_category", "TECHNICAL")),
+        ("Date & Time", ctx.get("event_slot") or "October 15, 2026, 09:30 AM"),
+        ("Venue", _default_venue(ctx)),
     ]
-    for label, value in details:
-        c.drawString(margin + 24, ty, f"{label}:")
-        c.setFont("Helvetica-Bold", 10)
-        c.drawString(margin + 140, ty, str(value)[:48])
-        c.setFont("Helvetica", 10)
-        ty -= 16
+    curr_y = draw_section_box("Event & Schedule", event_items, curr_y)
 
-    ty -= 6
+    # B. Payer & Registration Information
+    reg_type_str = str(ctx.get("payment_type", "SOLO")).replace("_", " ")
+    team_str = str(ctx.get("team_name") or "Individual (Solo)")
+    payer_items = [
+        ("Participant", ctx.get("payer_name", "—")),
+        ("Email", ctx.get("payer_email", "—")),
+        ("Contact Phone", ctx.get("payer_phone", "—")),
+        ("College / Inst.", ctx.get("payer_college", "—")),
+        ("Registration", f"{reg_type_str}  ·  {team_str}"),
+    ]
+    curr_y = draw_section_box("Participant & Registration", payer_items, curr_y)
+
+    # C. Team Roster (if team)
+    members = ctx.get("team_members") or []
+    if members:
+        c.setFillColorRGB(0.73, 0.11, 0.11)
+        c.setFont("Helvetica-Bold", 9)
+        c.drawString(left_x, curr_y, "TEAM ROSTER")
+        c.setStrokeColorRGB(0.73, 0.11, 0.11)
+        c.line(left_x, curr_y - 3, left_x + left_w, curr_y - 3)
+        curr_y -= 14
+
+        for m in members[:4]:
+            c.setFont("Helvetica", 8)
+            c.setFillColorRGB(0.06, 0.09, 0.16)
+            c.drawString(left_x + 4, curr_y, f"• {m.get('name', 'Member')} ({m.get('role', 'Member')})")
+            curr_y -= 12
+        curr_y -= 4
+
+    # 8. Right Side: Official Entry QR Pass Box
+    qr_box_h = 240
+    qr_box_y = content_top - qr_box_h + 10
+    c.setStrokeColorRGB(0.80, 0.84, 0.88)
+    c.setFillColorRGB(0.97, 0.98, 0.99)
+    c.roundRect(right_x, qr_box_y, right_w, qr_box_h, 8, fill=1, stroke=1)
+
+    # Header inside QR Box
+    c.setFillColorRGB(0.06, 0.09, 0.16)
     c.setFont("Helvetica-Bold", 9)
-    c.drawString(margin + 24, ty, "EVENTS REGISTERED")
-    ty -= 14
-    team_label = ctx.get("team_name") or "Individual"
-    count = _receipt_participant_count(ctx)
-    c.setFont("Helvetica", 9)
-    c.drawString(margin + 24, ty, f"{ctx['event_name'][:40]}  |  Team: {team_label[:20]}  |  {count} participant(s)")
-    ty -= 14
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(margin + 24, ty, f"TOTAL AMOUNT: ₹{ctx['amount_inr']} {ctx['currency']}")
+    c.drawCentredString(right_x + right_w / 2, qr_box_y + qr_box_h - 18, "OFFICIAL ENTRY PASS")
 
+    c.setFont("Helvetica", 7.5)
+    c.setFillColorRGB(0.45, 0.50, 0.58)
+    c.drawCentredString(right_x + right_w / 2, qr_box_y + qr_box_h - 30, "PERSONAL CHECK-IN QR")
+
+    # Render QR Code in Image
+    qr_url = ctx.get("qr_verify_url") or f"{settings.APP_PUBLIC_BASE_URL.rstrip('/')}/checkin?token={ctx.get('qr_token', '')}"
     qr_png = io.BytesIO()
-    qr_img = qrcode.make(ctx["qr_verify_url"])
+    qr_img = qrcode.make(qr_url)
+    # pyrefly: ignore [unexpected-keyword]
     qr_img.save(qr_png, format="PNG")
     qr_png.seek(0)
-    c.drawImage(ImageReader(qr_png), width - margin - 100, card_top - card_h + 24, width=88, height=88, mask="auto")
-    c.setFont("Helvetica", 8)
-    c.drawString(width - margin - 100, card_top - card_h + 12, "Entry QR (payer pass)")
 
+    qr_size = 114
+    qr_img_x = right_x + (right_w - qr_size) / 2
+    qr_img_y = qr_box_y + 60
+    c.drawImage(ImageReader(qr_png), qr_img_x, qr_img_y, width=qr_size, height=qr_size, mask="auto")
+
+    # QR Pass ID / Token
+    c.setFont("Helvetica-Bold", 8)
+    c.setFillColorRGB(0.73, 0.11, 0.11)
+    c.drawCentredString(right_x + right_w / 2, qr_box_y + 44, str(ctx.get("qr_token", "KRATOS-PASS"))[:20])
+
+    c.setFont("Helvetica", 7)
+    c.setFillColorRGB(0.45, 0.50, 0.58)
+    c.drawCentredString(right_x + right_w / 2, qr_box_y + 30, "Show this QR at the venue desk")
+    c.drawCentredString(right_x + right_w / 2, qr_box_y + 18, "Valid with student college ID")
+
+    # 9. Payment Summary Card (Full Width Banner)
+    pay_banner_h = 44
+    pay_banner_y = card_bottom + 52
+    c.setFillColorRGB(0.06, 0.09, 0.16)  # Dark slate
+    c.roundRect(card_left + 20, pay_banner_y, card_w - 40, pay_banner_h, 6, fill=1, stroke=0)
+
+    c.setFillColorRGB(0.71, 0.76, 0.84)
+    c.setFont("Helvetica", 8.5)
+    c.drawString(card_left + 34, pay_banner_y + 26, "TOTAL AMOUNT PAID")
     c.setFont("Helvetica", 8)
-    c.setFillColorRGB(0.45, 0.5, 0.58)
+    c.drawString(card_left + 34, pay_banner_y + 12, "Payment Mode: Online (Razorpay) · Status: Confirmed")
+
+    amount_str = f"INR {ctx.get('amount_inr', '250.00')}"
+    c.setFillColorRGB(1, 1, 1)
+    c.setFont("Helvetica-Bold", 16)
+    c.drawRightString(card_left + card_w - 34, pay_banner_y + 15, amount_str)
+
+    # 10. Footer Disclaimer
+    c.setFont("Helvetica", 7.5)
+    c.setFillColorRGB(0.45, 0.50, 0.58)
     c.drawCentredString(
         width / 2,
-        card_top - card_h + 16,
-        "Thank you for registering for KRATOS'26 · kratos.cse@gmail.com",
+        card_bottom + 26,
+        "This is an electronically generated official receipt. Association of Computer Engineers (ACE) · CSE Dept.",
+    )
+    c.drawCentredString(
+        width / 2,
+        card_bottom + 14,
+        "Easwari Engineering College, Chennai · For support contact kratos.cse@gmail.com",
     )
 
     c.showPage()
@@ -382,35 +547,41 @@ async def get_receipt_data_context(db: AsyncSession, payment_id: uuid.UUID) -> d
 
 
 def render_html_receipt(ctx: dict[str, Any]) -> str:
-    """KRATOS'26 registration receipt card — hierarchy aligned with legacy Kratos receipt."""
+    """KRATOS'26 official registration receipt card — ultra-modern responsive web UI."""
     urls = BRAND_IMAGE_URLS
     venue = html.escape(_default_venue(ctx))
     participant_count = _receipt_participant_count(ctx)
-    team_label = html.escape(ctx.get("team_name") or "Individual")
+    team_label = html.escape(ctx.get("team_name") or "Individual (Solo)")
     reg_type = html.escape(ctx["payment_type"].replace("_", " "))
     generated_at = datetime.now(timezone.utc).strftime("%d %b %Y, %I:%M %p UTC")
+
+    # PDF download link
+    payment_id_val = ctx.get("payment_id", "")
+    pdf_download_url = f"{settings.APP_PUBLIC_BASE_URL.rstrip('/')}/api/v1/payments/{payment_id_val}/receipt/pdf"
+    if ctx.get("receipt_token"):
+        pdf_download_url += f"?receipt_token={quote(ctx['receipt_token'], safe='')}"
 
     roster_rows = ""
     for member in ctx.get("team_members") or []:
         roster_rows += (
             "<tr>"
-            f'<td style="padding:10px 12px;border-bottom:1px solid #f1f5f9;">{html.escape(member["name"])}</td>'
-            f'<td style="padding:10px 12px;border-bottom:1px solid #f1f5f9;color:#64748b;">{html.escape(member["role"])}</td>'
-            f'<td style="padding:10px 12px;border-bottom:1px solid #f1f5f9;text-align:right;">'
-            f'<span style="background:#ecfdf5;color:#059669;font-size:11px;font-weight:600;padding:2px 8px;border-radius:9999px;">'
+            f'<td style="padding:10px 14px;border-bottom:1px solid #f1f5f9;font-weight:600;color:#0f172a;">{html.escape(member["name"])}</td>'
+            f'<td style="padding:10px 14px;border-bottom:1px solid #f1f5f9;color:#64748b;">{html.escape(member["role"])}</td>'
+            f'<td style="padding:10px 14px;border-bottom:1px solid #f1f5f9;text-align:right;">'
+            f'<span style="background:#ecfdf5;color:#059669;font-size:11px;font-weight:700;padding:3px 10px;border-radius:9999px;">'
             f'{html.escape(member["status"])}</span></td></tr>'
         )
     roster_block = ""
     if roster_rows:
         roster_block = f"""
-        <div style="margin-top:20px;">
-          <p style="margin:0 0 8px;font-size:11px;font-weight:700;letter-spacing:0.1em;color:#64748b;text-transform:uppercase;">
-            Team roster</p>
-          <table style="width:100%;border-collapse:collapse;font-size:13px;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden;">
-            <thead><tr style="background:#f8fafc;color:#475569;font-size:11px;text-transform:uppercase;">
-              <th style="padding:8px 12px;text-align:left;">Member</th>
-              <th style="padding:8px 12px;text-align:left;">Role</th>
-              <th style="padding:8px 12px;text-align:right;">Status</th>
+        <div style="margin-top:24px;">
+          <p style="margin:0 0 10px;font-size:11px;font-weight:700;letter-spacing:0.12em;color:#64748b;text-transform:uppercase;">
+            Team Roster</p>
+          <table style="width:100%;border-collapse:collapse;font-size:13px;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;background:#fff;">
+            <thead><tr style="background:#f8fafc;color:#475569;font-size:11px;text-transform:uppercase;letter-spacing:0.06em;">
+              <th style="padding:10px 14px;text-align:left;">Member</th>
+              <th style="padding:10px 14px;text-align:left;">Role</th>
+              <th style="padding:10px 14px;text-align:right;">Status</th>
             </tr></thead>
             <tbody>{roster_rows}</tbody>
           </table>
@@ -420,9 +591,10 @@ def render_html_receipt(ctx: dict[str, Any]) -> str:
     if ctx.get("whatsapp_link"):
         whatsapp_btn = (
             f'<p style="margin:16px 0 0;text-align:center;">'
-            f'<a href="{html.escape(ctx["whatsapp_link"])}" style="display:inline-block;background:#25D366;color:#fff;'
-            f'text-decoration:none;padding:10px 18px;border-radius:8px;font-size:13px;font-weight:600;">'
-            f"Join event WhatsApp group</a></p>"
+            f'<a href="{html.escape(ctx["whatsapp_link"])}" target="_blank" rel="noopener noreferrer" '
+            f'style="display:inline-flex;align-items:center;justify-content:center;gap:8px;background:#25D366;color:#ffffff;'
+            f'text-decoration:none;padding:10px 20px;border-radius:8px;font-size:13px;font-weight:700;box-shadow:0 4px 12px rgba(37,211,102,0.25);">'
+            f'<span>💬 Join Event WhatsApp Group</span></a></p>'
         )
 
     return f"""<!DOCTYPE html>
@@ -431,55 +603,218 @@ def render_html_receipt(ctx: dict[str, Any]) -> str:
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>KRATOS'26 Receipt — {html.escape(ctx['receipt_number'])}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <style>
-    body {{ margin:0; font-family:Segoe UI,Helvetica,Arial,sans-serif; background:#0f172a; color:#0f172a; }}
-    .wrap {{ max-width:680px; margin:0 auto; padding:32px 16px 48px; }}
-    .hero {{ text-align:center; color:#f8fafc; margin-bottom:28px; }}
-    .hero h1 {{ margin:0 0 8px; font-size:28px; font-weight:800; }}
-    .hero p {{ margin:0; color:#94a3b8; font-size:15px; }}
-    .card {{ background:#fff; border-radius:12px; overflow:hidden; box-shadow:0 25px 50px -12px rgba(0,0,0,.45); }}
-    .toolbar {{ background:#1e293b; padding:10px 16px; display:flex; justify-content:space-between; align-items:center; }}
-    .toolbar span {{ color:#94a3b8; font-size:12px; }}
-    .btn-print {{ cursor:pointer; border:none; background:#b91c1c; color:#fff; font-weight:600; font-size:13px; padding:8px 14px; border-radius:6px; }}
-    .brand {{ text-align:center; padding:28px 24px 20px; border-bottom:1px solid #e2e8f0; }}
-    .brand-logos {{ display:flex; align-items:center; justify-content:center; gap:12px; margin-bottom:12px; }}
-    .brand-logos img.lion {{ width:48px; height:48px; border-radius:8px; }}
-    .brand-logos img.wordmark {{ height:32px; width:auto; }}
-    .symposium {{ font-size:12px; color:#64748b; letter-spacing:.12em; text-transform:uppercase; margin-top:4px; }}
-    .receipt-label {{ margin-top:14px; font-size:11px; font-weight:700; letter-spacing:.18em; color:#b91c1c; }}
-    .venue {{ background:linear-gradient(135deg,#7f1d1d 0%,#b91c1c 50%,#991b1b 100%); color:#fff; text-align:center; padding:18px 20px; }}
-    .venue .tag {{ font-size:10px; letter-spacing:.2em; opacity:.85; margin-bottom:6px; }}
-    .venue .name {{ font-size:15px; font-weight:700; }}
-    .venue .sub {{ font-size:12px; opacity:.9; margin-top:4px; }}
-    .body {{ padding:24px 28px 28px; }}
-    .meta {{ display:grid; grid-template-columns:1fr 1fr; gap:12px 20px; margin-bottom:24px; }}
-    .meta .k {{ font-size:11px; color:#64748b; text-transform:uppercase; letter-spacing:.06em; }}
-    .meta .v {{ font-size:14px; font-weight:600; color:#0f172a; margin-top:2px; }}
-    .section-h {{ font-size:11px; font-weight:700; letter-spacing:.12em; color:#64748b; text-transform:uppercase; margin:0 0 10px; }}
-    .events-table {{ width:100%; border-collapse:collapse; font-size:13px; border:1px solid #e2e8f0; border-radius:8px; overflow:hidden; }}
-    .events-table th {{ background:#f8fafc; color:#475569; font-size:10px; text-transform:uppercase; letter-spacing:.06em; padding:10px 12px; text-align:left; }}
-    .events-table td {{ padding:12px; border-top:1px solid #f1f5f9; vertical-align:top; }}
-    .total {{ margin-top:20px; background:#0f172a; color:#f8fafc; border-radius:8px; padding:16px 20px; display:flex; justify-content:space-between; align-items:center; }}
-    .total span:first-child {{ font-size:12px; letter-spacing:.1em; text-transform:uppercase; opacity:.8; }}
-    .total span:last-child {{ font-size:22px; font-weight:800; }}
-    .pass-grid {{ display:grid; grid-template-columns:1fr 180px; gap:20px; margin-top:24px; align-items:start; }}
-    @media (max-width:600px) {{ .pass-grid {{ grid-template-columns:1fr; }} .meta {{ grid-template-columns:1fr; }} }}
-    .participant .row {{ display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px dashed #e2e8f0; font-size:13px; }}
-    .participant .row .k {{ color:#64748b; }}
-    .participant .row .v {{ font-weight:600; text-align:right; max-width:58%; }}
-    .qr-box {{ text-align:center; border:2px dashed #cbd5e1; border-radius:10px; padding:14px; background:#f8fafc; }}
-    .qr-box svg {{ width:140px; height:140px; }}
-    .qr-hint {{ font-size:11px; color:#64748b; margin-top:8px; line-height:1.4; }}
-    .card-footer {{ background:#f8fafc; border-top:1px solid #e2e8f0; padding:18px 24px; text-align:center; font-size:12px; color:#64748b; line-height:1.55; }}
-    .instructions {{ margin-top:24px; background:linear-gradient(135deg,#eff6ff 0%,#e0e7ff 100%); border:1px solid #bfdbfe; border-radius:12px; padding:20px 24px; }}
-    .instructions h3 {{ margin:0 0 12px; font-size:14px; color:#1e3a8a; }}
+    * {{ box-sizing:border-box; }}
+    body {{
+      margin:0;
+      font-family:'Plus Jakarta Sans','Inter',-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;
+      background:#090d16;
+      background-image:radial-gradient(at 50% 0%, rgba(185,28,28,0.15) 0px, transparent 60%), radial-gradient(at 100% 100%, rgba(15,23,42,0.8) 0px, transparent 50%);
+      color:#0f172a;
+      min-height:100vh;
+      padding:32px 16px 48px;
+    }}
+    .wrap {{ max-width:720px; margin:0 auto; }}
+    .hero {{ text-align:center; color:#f8fafc; margin-bottom:24px; }}
+    .hero h1 {{ margin:0 0 6px; font-size:26px; font-weight:800; letter-spacing:-0.02em; }}
+    .hero p {{ margin:0; color:#94a3b8; font-size:14px; }}
+    .card {{
+      background:#ffffff;
+      border-radius:16px;
+      overflow:hidden;
+      box-shadow:0 25px 60px -15px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.08);
+    }}
+    .toolbar {{
+      background:#0f172a;
+      padding:12px 20px;
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      border-bottom:1px solid #1e293b;
+    }}
+    .toolbar .badge-num {{
+      color:#94a3b8;
+      font-size:12px;
+      font-weight:600;
+      letter-spacing:0.04em;
+    }}
+    .toolbar-actions {{ display:flex; gap:10px; }}
+    .btn-action {{
+      cursor:pointer;
+      border:none;
+      text-decoration:none;
+      font-weight:700;
+      font-size:12px;
+      padding:8px 14px;
+      border-radius:6px;
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      transition:all 0.15s ease;
+    }}
+    .btn-print {{ background:#b91c1c; color:#ffffff; }}
+    .btn-print:hover {{ background:#991b1b; }}
+    .btn-pdf {{ background:#1e293b; color:#f8fafc; border:1px solid #334155; }}
+    .btn-pdf:hover {{ background:#334155; }}
+    
+    .brand {{ text-align:center; padding:22px 24px 16px; border-bottom:1px solid #f1f5f9; background:#ffffff; }}
+    .brand-logos {{ display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:10px; }}
+    .brand-logos .brand-center {{ display:flex; align-items:center; justify-content:center; gap:10px; }}
+    .brand-logos img.lion {{ width:38px; height:38px; border-radius:8px; }}
+    .brand-logos img.wordmark {{ height:24px; width:auto; }}
+    .brand-logos img.side-logo {{ height:32px; width:auto; max-width:110px; object-fit:contain; }}
+    .symposium {{ font-size:12px; color:#64748b; letter-spacing:.12em; text-transform:uppercase; font-weight:600; margin-top:4px; }}
+    .receipt-label {{
+      display:inline-block;
+      margin-top:8px;
+      font-size:11px;
+      font-weight:800;
+      letter-spacing:.18em;
+      color:#b91c1c;
+      background:#fef2f2;
+      padding:4px 12px;
+      border-radius:9999px;
+    }}
+
+    .venue {{
+      background:linear-gradient(135deg, #7f1d1d 0%, #b91c1c 50%, #991b1b 100%);
+      color:#ffffff;
+      text-align:center;
+      padding:16px 20px;
+    }}
+    .venue .tag {{ font-size:10px; letter-spacing:.22em; opacity:.85; font-weight:700; text-transform:uppercase; }}
+    .venue .name {{ font-size:15px; font-weight:800; margin-top:2px; }}
+    .venue .sub {{ font-size:12px; opacity:.92; margin-top:3px; }}
+
+    .body {{ padding:28px 32px; }}
+    .meta-grid {{
+      display:grid;
+      grid-template-columns:repeat(4, 1fr);
+      gap:12px;
+      margin-bottom:28px;
+      background:#f8fafc;
+      padding:16px 18px;
+      border-radius:12px;
+      border:1px solid #e2e8f0;
+    }}
+    .meta-grid .item .k {{ font-size:10px; color:#64748b; text-transform:uppercase; letter-spacing:.08em; font-weight:700; }}
+    .meta-grid .item .v {{ font-size:13px; font-weight:700; color:#0f172a; margin-top:4px; word-break:break-word; }}
+
+    .section-h {{
+      font-size:11px;
+      font-weight:800;
+      letter-spacing:.12em;
+      color:#64748b;
+      text-transform:uppercase;
+      margin:0 0 12px;
+      display:flex;
+      align-items:center;
+      gap:6px;
+    }}
+    .events-table {{
+      width:100%;
+      border-collapse:collapse;
+      font-size:13px;
+      border:1px solid #e2e8f0;
+      border-radius:10px;
+      overflow:hidden;
+      background:#ffffff;
+    }}
+    .events-table th {{
+      background:#f8fafc;
+      color:#475569;
+      font-size:10px;
+      text-transform:uppercase;
+      letter-spacing:.08em;
+      padding:12px 16px;
+      text-align:left;
+      font-weight:700;
+    }}
+    .events-table td {{ padding:14px 16px; border-top:1px solid #f1f5f9; vertical-align:middle; }}
+
+    .total-banner {{
+      margin-top:20px;
+      background:linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+      color:#f8fafc;
+      border-radius:12px;
+      padding:16px 22px;
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      box-shadow:0 10px 25px -5px rgba(15,23,42,0.3);
+    }}
+    .total-banner .lbl {{ font-size:12px; letter-spacing:.12em; text-transform:uppercase; font-weight:700; color:#94a3b8; }}
+    .total-banner .val {{ font-size:22px; font-weight:800; color:#ffffff; }}
+
+    .pass-grid {{
+      display:grid;
+      grid-template-columns:1fr 200px;
+      gap:24px;
+      margin-top:28px;
+      align-items:start;
+    }}
+    @media (max-width:640px) {{
+      .pass-grid {{ grid-template-columns:1fr; }}
+      .meta-grid {{ grid-template-columns:1fr 1fr; }}
+      .body {{ padding:20px; }}
+    }}
+    .participant-card {{
+      background:#f8fafc;
+      border:1px solid #e2e8f0;
+      border-radius:12px;
+      padding:16px 20px;
+    }}
+    .participant-card .row {{
+      display:flex;
+      justify-content:space-between;
+      padding:8px 0;
+      border-bottom:1px dashed #e2e8f0;
+      font-size:13px;
+    }}
+    .participant-card .row:last-child {{ border-bottom:none; }}
+    .participant-card .row .k {{ color:#64748b; font-weight:500; }}
+    .participant-card .row .v {{ font-weight:700; color:#0f172a; text-align:right; max-width:62%; word-break:break-word; }}
+
+    .qr-box {{
+      text-align:center;
+      border:2px dashed #cbd5e1;
+      border-radius:12px;
+      padding:16px;
+      background:#f8fafc;
+    }}
+    .qr-box svg {{ width:140px; height:140px; display:inline-block; }}
+    .qr-hint {{ font-size:11px; color:#64748b; margin-top:8px; line-height:1.4; font-weight:500; }}
+
+    .card-footer {{
+      background:#f8fafc;
+      border-top:1px solid #e2e8f0;
+      padding:20px 24px;
+      text-align:center;
+      font-size:12px;
+      color:#64748b;
+      line-height:1.6;
+    }}
+    .partners {{ margin-top:14px; display:flex; justify-content:center; align-items:center; gap:16px; }}
+    .partners img {{ height:24px; opacity:.9; }}
+
+    .instructions {{
+      margin-top:24px;
+      background:linear-gradient(135deg, #eff6ff 0%, #e0e7ff 100%);
+      border:1px solid #bfdbfe;
+      border-radius:14px;
+      padding:20px 24px;
+    }}
+    .instructions h3 {{ margin:0 0 10px; font-size:14px; color:#1e3a8a; font-weight:800; }}
     .instructions ul {{ margin:0; padding-left:18px; color:#334155; font-size:13px; line-height:1.65; }}
-    .partners {{ margin-top:16px; text-align:center; }}
-    .partners img {{ height:22px; margin:0 8px; opacity:.9; vertical-align:middle; }}
+
     @media print {{
-      body {{ background:#fff; }}
-      .toolbar {{ display:none !important; }}
-      .card, .venue, .total {{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }}
+      body {{ background:#ffffff; padding:0; }}
+      .toolbar, .hero, .instructions, .partners {{ display:none !important; }}
+      .card {{ box-shadow:none; border:none; }}
+      .venue, .total-banner {{ -webkit-print-color-adjust:exact; print-color-adjust:exact; }}
     }}
   </style>
 </head>
@@ -487,78 +822,95 @@ def render_html_receipt(ctx: dict[str, Any]) -> str:
   <div class="wrap">
     <div class="hero">
       <h1>Registration Confirmed!</h1>
-      <p>Your registration for KRATOS&apos;26 has been successfully processed</p>
+      <p>Your official receipt and entry pass for KRATOS&apos;26</p>
     </div>
 
     <div class="card">
       <div class="toolbar">
-        <span>Official registration receipt · {html.escape(ctx['receipt_number'])}</span>
-        <button type="button" class="btn-print" onclick="window.print()">Print / Save PDF</button>
+        <span class="badge-num">Official Receipt · {html.escape(ctx['receipt_number'])}</span>
+        <div class="toolbar-actions">
+          <button type="button" class="btn-action btn-print" onclick="window.print()">🖨️ Print Receipt</button>
+          <a href="{html.escape(pdf_download_url)}" class="btn-action btn-pdf">📥 Download PDF</a>
+        </div>
       </div>
 
       <div class="brand">
         <div class="brand-logos">
-          <img class="lion" src="{html.escape(urls['lion_mark'], quote=True)}" alt="KRATOS lion mark" />
-          <img class="wordmark" src="{html.escape(urls['kratos26'], quote=True)}" alt="KRATOS'26" />
+          <img class="side-logo" src="{html.escape(urls['eec_white'], quote=True)}" alt="Easwari Engineering College" />
+          <div class="brand-center">
+            <img class="lion" src="{html.escape(urls['lion_mark'], quote=True)}" alt="KRATOS lion mark" />
+            <img class="wordmark" src="{html.escape(urls['kratos26'], quote=True)}" alt="KRATOS'26" />
+          </div>
+          <img class="side-logo" src="{html.escape(urls['cse_logo'], quote=True)}" alt="Department of CSE" />
         </div>
-        <div class="symposium">Technical Symposium</div>
-        <div class="receipt-label">REGISTRATION RECEIPT</div>
+        <div class="symposium">Department of Computer Science &amp; Engineering · Technical Symposium</div>
+        <div class="receipt-label">OFFICIAL REGISTRATION RECEIPT</div>
       </div>
 
       <div class="venue">
-        <div class="tag">VENUE</div>
+        <div class="tag">VENUE & LOCATION</div>
         <div class="name">{venue}</div>
         <div class="sub">Easwari Engineering College · Chennai, Tamil Nadu</div>
       </div>
 
       <div class="body">
-        <div class="meta">
-          <div><div class="k">Payment ID</div><div class="v">{html.escape(ctx.get('razorpay_payment_id') or str(ctx.get('payment_id', '')))}</div></div>
-          <div><div class="k">Registration date</div><div class="v">{html.escape(ctx['issued_at_formatted'])}</div></div>
-          <div><div class="k">Receipt number</div><div class="v">{html.escape(ctx['receipt_number'])}</div></div>
-          <div><div class="k">Status</div><div class="v" style="color:#059669;">✅ Confirmed</div></div>
+        <div class="meta-grid">
+          <div class="item"><div class="k">Receipt No</div><div class="v">{html.escape(ctx['receipt_number'])}</div></div>
+          <div class="item"><div class="k">Date & Time</div><div class="v">{html.escape(ctx['issued_at_formatted'])}</div></div>
+          <div class="item"><div class="k">Payment ID</div><div class="v">{html.escape(ctx.get('razorpay_payment_id') or str(ctx.get('payment_id', '')))}</div></div>
+          <div class="item"><div class="k">Status</div><div class="v" style="color:#059669;">✔ Confirmed</div></div>
         </div>
 
-        <p class="section-h">Events registered</p>
+        <p class="section-h">Registered Event Details</p>
         <table class="events-table">
           <thead>
             <tr>
-              <th>Event</th>
-              <th>Team</th>
+              <th>Event Name</th>
+              <th>Registration Type</th>
               <th>Participants</th>
               <th style="text-align:right;">Amount</th>
             </tr>
           </thead>
           <tbody>
             <tr>
-              <td><strong>{html.escape(ctx['event_name'])}</strong><br />
-                <span style="font-size:11px;color:#64748b;">{reg_type}</span></td>
-              <td>{team_label}</td>
-              <td>{participant_count}</td>
-              <td style="text-align:right;font-weight:700;">₹{html.escape(ctx['amount_inr'])}</td>
+              <td>
+                <strong style="font-size:14px;color:#0f172a;">{html.escape(ctx['event_name'])}</strong><br />
+                <span style="font-size:11px;color:#64748b;">Category: {html.escape(ctx.get('event_category', 'Technical'))}</span>
+              </td>
+              <td>
+                <span style="background:#f1f5f9;color:#334155;font-size:11px;font-weight:700;padding:3px 10px;border-radius:6px;">
+                  {team_label} ({reg_type})
+                </span>
+              </td>
+              <td style="font-weight:600;color:#0f172a;">{participant_count}</td>
+              <td style="text-align:right;font-weight:800;font-size:15px;color:#0f172a;">₹{html.escape(ctx['amount_inr'])}</td>
             </tr>
           </tbody>
         </table>
 
-        <div class="total">
-          <span>Total amount</span>
-          <span>₹{html.escape(ctx['amount_inr'])} {html.escape(ctx['currency'])}</span>
+        <div class="total-banner">
+          <span class="lbl">Total Registration Fee Paid</span>
+          <span class="val">₹{html.escape(ctx['amount_inr'])} {html.escape(ctx['currency'])}</span>
         </div>
 
         <div class="pass-grid">
-          <div class="participant">
-            <p class="section-h">Registered by</p>
-            <div class="row"><span class="k">Name</span><span class="v">{html.escape(ctx['payer_name'])}</span></div>
-            <div class="row"><span class="k">Email</span><span class="v">{html.escape(ctx['payer_email'])}</span></div>
-            <div class="row"><span class="k">College</span><span class="v">{html.escape(ctx['payer_college'] or '—')}</span></div>
-            <div class="row"><span class="k">Order ref</span><span class="v">{html.escape(ctx['razorpay_order_id'])}</span></div>
+          <div class="participant-section">
+            <p class="section-h">Registered Participant</p>
+            <div class="participant-card">
+              <div class="row"><span class="k">Participant Name</span><span class="v">{html.escape(ctx['payer_name'])}</span></div>
+              <div class="row"><span class="k">Email Address</span><span class="v">{html.escape(ctx['payer_email'])}</span></div>
+              <div class="row"><span class="k">Contact Phone</span><span class="v">{html.escape(ctx['payer_phone'] or '—')}</span></div>
+              <div class="row"><span class="k">College / Inst.</span><span class="v">{html.escape(ctx['payer_college'] or '—')}</span></div>
+              <div class="row"><span class="k">Order Reference</span><span class="v">{html.escape(ctx['razorpay_order_id'])}</span></div>
+            </div>
             {roster_block}
           </div>
+
           <div>
-            <p class="section-h">Entry QR pass</p>
+            <p class="section-h">Event Entry Pass</p>
             <div class="qr-box">
               {ctx['qr_svg']}
-              <p class="qr-hint">Present this QR at event check-in.<br />Each team member receives their own QR by email.</p>
+              <p class="qr-hint">Scan at the event check-in desk.<br />Valid with student college ID.</p>
             </div>
             {whatsapp_btn}
           </div>
@@ -566,8 +918,8 @@ def render_html_receipt(ctx: dict[str, Any]) -> str:
       </div>
 
       <div class="card-footer">
-        <p style="margin:0 0 6px;">🎉 Thank you for registering for KRATOS&apos;26! 🎉</p>
-        <p style="margin:0;font-size:11px;">Keep this receipt for your records · Generated {generated_at}</p>
+        <p style="margin:0 0 6px;font-weight:700;color:#0f172a;">🎉 Thank you for registering for KRATOS&apos;26! 🎉</p>
+        <p style="margin:0;font-size:11px;">Keep this official receipt for your records · Electronically generated at {generated_at}</p>
         <div class="partners">
           <img src="{html.escape(urls['eec_white'], quote=True)}" alt="EEC" />
           <img src="{html.escape(urls['ace_white'], quote=True)}" alt="ACE" />
@@ -577,13 +929,12 @@ def render_html_receipt(ctx: dict[str, Any]) -> str:
     </div>
 
     <div class="instructions">
-      <h3>Important instructions</h3>
+      <h3>Important Event Instructions</h3>
       <ul>
-        <li>Save this receipt for event entry verification.</li>
-        <li>Check your email for your personal QR pass and event details.</li>
-        <li>Arrive at least 30 minutes before the event start time.</li>
-        <li>Bring a valid college ID for verification at the venue.</li>
-        <li>For support, contact <strong>kratos.cse@gmail.com</strong></li>
+        <li>Keep this receipt and QR code handy on your phone for verification at the event entrance.</li>
+        <li>Please arrive at least 30 minutes prior to the scheduled event time.</li>
+        <li>A valid college identity card is mandatory for venue entry and verification.</li>
+        <li>For queries or technical assistance, contact the organizing team at <strong>kratos.cse@gmail.com</strong>.</li>
       </ul>
     </div>
   </div>
