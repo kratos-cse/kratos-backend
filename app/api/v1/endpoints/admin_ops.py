@@ -448,7 +448,11 @@ async def list_teams(
     scoped = await scoped_event_ids(db, admin)
     if event_id is not None:
         await require_event_access(db, admin, event_id, "team-read")
-    q = select(Team).options(selectinload(Team.event)).order_by(Team.created_at.desc())
+    q = (
+        select(Team, Event.name)
+        .join(Event, Team.event_id == Event.id)
+        .order_by(Team.created_at.desc())
+    )
     if scoped is not None:
         if not scoped:
             return _success([])
@@ -459,19 +463,18 @@ async def list_teams(
         q = q.where(Team.status == team_status)
     q = q.offset(skip).limit(min(limit, 100))
     result = await db.execute(q)
-    teams = result.scalars().all()
     return _success(
         [
             {
-                "id": t.id,
-                "event_id": t.event_id,
-                "event_name": t.event.name if t.event else None,
-                "name": t.name,
-                "leader_profile_id": t.leader_profile_id,
-                "status": t.status,
-                "created_at": t.created_at,
+                "id": team.id,
+                "event_id": team.event_id,
+                "event_name": event_name,
+                "name": team.name,
+                "leader_profile_id": team.leader_profile_id,
+                "status": team.status,
+                "created_at": team.created_at,
             }
-            for t in teams
+            for team, event_name in result.all()
         ]
     )
 

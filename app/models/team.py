@@ -24,6 +24,7 @@ class Team(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    event: Mapped["Event"] = relationship("Event")
     members: Mapped[List["TeamMember"]] = relationship("TeamMember", back_populates="team")
     invitations: Mapped[List["TeamInvitation"]] = relationship("TeamInvitation", back_populates="team")
 
