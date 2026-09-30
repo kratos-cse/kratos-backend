@@ -1,12 +1,16 @@
-"""Async Mailjet sender for the separate transactional email system."""
+"""Async SMTP sender for transactional email delivery."""
 
 import asyncio
-import base64
-import html
+from email import encoders
+from email.message import EmailMessage
+from email.mime.image import MIMEImage
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.utils import formataddr
 import logging
 from typing import Optional, Sequence
 
-from mailjet_rest import Client
+import aiosmtplib
 
 from app.core.config import settings
 
@@ -15,11 +19,13 @@ logger = logging.getLogger("email_service")
 InlineImage = tuple[str, str, bytes]  # (content_id, mime_type, data)
 
 
-def _mailjet_client() -> Client:
-    return Client(
-        auth=(settings.MAILJET_API_KEY, settings.MAILJET_SECRET_KEY),
-        version="v3.1",
-    )
+def _from_address() -> str:
+    """Format the sender address with optional display name."""
+    from_name = getattr(settings, "SMTP_FROM_NAME", "")
+    from_email = settings.SMTP_FROM
+    if from_name and from_email:
+        return formataddr((from_name, from_email))
+    return from_email
 
 
 async def send_email(
@@ -30,43 +36,54 @@ async def send_email(
     html_body: Optional[str] = None,
     inline_images: Optional[Sequence[InlineImage]] = None,
 ) -> tuple[bool, str | None]:
-    """Send one email through Mailjet without blocking the event loop."""
-    required_settings = (
-        ("MAILJET_API_KEY", settings.MAILJET_API_KEY),
-        ("MAILJET_SECRET_KEY", settings.MAILJET_SECRET_KEY),
-        ("MAILJET_FROM_EMAIL", settings.MAILJET_FROM_EMAIL),
-    )
-    for name, value in required_settings:
-        if not value:
-            return False, f"{name} is not configured"
+    """Send one email through SMTP without blocking the event loop."""
+    if not settings.SMTP_HOST or not settings.SMTP_FROM:
+        return False, "SMTP not configured (SMTP_HOST / SMTP_FROM missing)"
 
-    message: dict = {
-        "From": {
-            "Email": settings.MAILJET_FROM_EMAIL,
-            "Name": settings.MAILJET_FROM_NAME,
-        },
-        "To": [{"Email": to_email}],
-        "Subject": subject,
-        "TextPart": text_body,
-        "HTMLPart": html_body or html.escape(text_body).replace("\n", "<br>"),
-    }
     if inline_images:
-        message["InlinedAttachments"] = [
-            {
-                "ContentType": mime,
-                "Filename": f"{cid}.png",
-                "ContentID": cid,
-                "Base64Content": base64.b64encode(data).decode("ascii"),
-            }
-            for cid, mime, data in inline_images
-        ]
-    payload = {"Messages": [message]}
+        message = MIMEMultipart("related")
+        message["From"] = _from_address()
+        message["To"] = to_email
+        message["Subject"] = subject
 
+        alt = MIMEMultipart("alternative")
+        alt.attach(MIMEText(text_body, "plain", "utf-8"))
+        if html_body:
+            alt.attach(MIMEText(html_body, "html", "utf-8"))
+        message.attach(alt)
+
+        for cid, mime, data in inline_images:
+            subtype = mime.split("/")[-1] if "/" in mime else "png"
+            img = MIMEImage(data, _subtype=subtype)
+            img.add_header("Content-ID", f"<{cid}>")
+            img.add_header("Content-Disposition", "inline", filename=f"{cid}.png")
+            encoders.encode_base64(img)
+            message.attach(img)
+    else:
+        message = EmailMessage()
+        message["From"] = _from_address()
+        message["To"] = to_email
+        message["Subject"] = subject
+        message.set_content(text_body)
+        if html_body:
+            message.add_alternative(html_body, subtype="html")
+
+    password = settings.SMTP_PASSWORD.replace(" ", "").strip() if settings.SMTP_PASSWORD else None
     try:
-        response = await asyncio.to_thread(_mailjet_client().send.create, data=payload)
-        if response.status_code >= 400:
-            return False, f"Mailjet {response.status_code}: {response.text}"
+        await asyncio.wait_for(
+            aiosmtplib.send(
+                message,
+                hostname=settings.SMTP_HOST,
+                port=settings.SMTP_PORT,
+                username=settings.SMTP_USER or None,
+                password=password,
+                start_tls=settings.SMTP_TLS,
+                timeout=15.0,
+            ),
+            timeout=20.0,
+        )
         return True, None
     except Exception as exc:
-        logger.exception("Mailjet email failed to=%s subject=%s", to_email, subject)
-        return False, str(exc).strip() or exc.__class__.__name__
+        logger.exception("SMTP email failed to=%s subject=%s", to_email, subject)
+        err = str(exc).strip() or exc.__class__.__name__
+        return False, err
