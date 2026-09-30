@@ -87,6 +87,8 @@ async def create_event(
         visibility=EventVisibility.UNPUBLISHED,
         registration_status=EventRegistrationStatus.CLOSED,
     )
+    if event.slot is None:
+        ops.apply_event_slot_from_schedule(event)
     db.add(event)
     await db.flush()
 
@@ -144,7 +146,7 @@ async def get_admin_event(
     _: AdminUser = Depends(get_current_active_admin),
 ):
     event, rules = await ops.get_event_with_rules(db, event_id)
-    return _success(await ops.event_to_dict_with_state(db, event, rules))
+    return _success(await ops.event_to_dict_with_state(db, event, rules, include_config_summary=True))
 
 
 @router.patch("/events/{event_id}")
@@ -155,8 +157,11 @@ async def patch_event(
     _: AdminUser = Depends(require_permission("event-management")),
 ):
     event, rules = await ops.get_event_with_rules(db, event_id)
-    for field, value in body.model_dump(exclude_unset=True).items():
+    data = body.model_dump(exclude_unset=True)
+    for field, value in data.items():
         setattr(event, field, value)
+    if "slot" not in data and ("starts_at" in data or "ends_at" in data):
+        ops.apply_event_slot_from_schedule(event)
     await db.commit()
     await db.refresh(event)
     await db.refresh(rules)
@@ -476,6 +481,7 @@ async def list_registrations(
     q = q.offset(skip).limit(min(limit, 100))
     result = await db.execute(q)
     registrations = result.scalars().all()
+    await ops.attach_field_responses_to_registrations(db, registrations)
     items = [ops.serialize_admin_registration(r) for r in registrations]
     return _success({"items": items, "skip": skip, "limit": limit})
 

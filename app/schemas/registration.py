@@ -5,7 +5,7 @@ from enum import Enum
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.enums import PaymentStatus, RegistrationStatus, TeamStatus
-from app.schemas.event_content import FieldResponseInput
+from app.schemas.event_content import FieldResponseInput, FieldResponseOut
 from app.schemas.team import TeamMemberOut
 
 
@@ -55,6 +55,7 @@ class RegistrationOut(BaseModel):
     profile_id: uuid.UUID | None = None
     team: TeamOut | None = None
     payment: PaymentSummary | None = None
+    field_responses: list[FieldResponseOut] = []
 
 
 class ReceiptOut(BaseModel):

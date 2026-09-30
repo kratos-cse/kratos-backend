@@ -1,5 +1,6 @@
 """Admin operations — dashboard aggregates, team admin actions, Excel exports."""
 import csv
+import json
 import uuid
 from io import BytesIO, StringIO
 from typing import Any, Optional
@@ -15,6 +16,8 @@ from sqlalchemy.orm import selectinload
 from app.models.attendance import AttendanceScan
 from app.models.enums import (
     PaymentType,
+    RegistrationFieldScope,
+    RegistrationFieldSource,
     RegistrationMode,
     RegistrationStatus,
     TeamMemberRole,
@@ -22,11 +25,19 @@ from app.models.enums import (
     TeamStatus,
 )
 from app.models.event import Event, EventRegistrationRule
+from app.models.event_content import (
+    EventContentSection,
+    EventCoordinator,
+    EventRegistrationField,
+    RegistrationFieldResponse,
+)
 from app.models.payment import Payment
 from app.models.profile import Profile
 from app.models.registration import Registration
 from app.models.team import Team, TeamMember
+from app.schemas.event_content import FieldResponseOut
 from app.services import qr_service
+from app.services.event_slot import derive_event_slot
 from app.services.roster_service import (
     apply_roster_to_rules,
     count_mandatory,
@@ -154,15 +165,64 @@ def event_to_dict(event: Event, rules: EventRegistrationRule) -> dict[str, Any]:
     }
 
 
+async def admin_event_config_summary(db: AsyncSession, event_id: uuid.UUID) -> dict[str, int]:
+    coordinators = (
+        await db.execute(select(func.count()).select_from(EventCoordinator).where(EventCoordinator.event_id == event_id))
+    ).scalar_one()
+    sections = (
+        await db.execute(
+            select(func.count()).select_from(EventContentSection).where(EventContentSection.event_id == event_id)
+        )
+    ).scalar_one()
+    reg_fields = (
+        await db.execute(
+            select(func.count())
+            .select_from(EventRegistrationField)
+            .where(
+                EventRegistrationField.event_id == event_id,
+                EventRegistrationField.scope == RegistrationFieldScope.REGISTRATION,
+            )
+        )
+    ).scalar_one()
+    member_fields = (
+        await db.execute(
+            select(func.count())
+            .select_from(EventRegistrationField)
+            .where(
+                EventRegistrationField.event_id == event_id,
+                EventRegistrationField.scope == RegistrationFieldScope.TEAM_MEMBER,
+            )
+        )
+    ).scalar_one()
+    return {
+        "coordinators_count": int(coordinators),
+        "content_sections_count": int(sections),
+        "registration_fields_count": int(reg_fields),
+        "team_member_fields_count": int(member_fields),
+    }
+
+
 async def event_to_dict_with_state(
-    db: AsyncSession, event: Event, rules: EventRegistrationRule
+    db: AsyncSession,
+    event: Event,
+    rules: EventRegistrationRule,
+    *,
+    include_config_summary: bool = False,
 ) -> dict[str, Any]:
     """Admin + public clients: same derived registration fields as GET /events."""
     from app.services.event_projection import build_event_state
 
     payload = event_to_dict(event, rules)
     payload.update(await build_event_state(db, event, rules))
+    if include_config_summary:
+        payload["config_summary"] = await admin_event_config_summary(db, event.id)
     return payload
+
+
+def apply_event_slot_from_schedule(event: Event) -> None:
+    """Set slot from starts_at/ends_at when not already set on the row."""
+    if event.starts_at is not None:
+        event.slot = derive_event_slot(event.starts_at, event.ends_at)
 
 
 async def transfer_team_leadership(
@@ -410,6 +470,30 @@ async def _get_registration_export_data(
         prof_result = await db.execute(select(Profile).where(Profile.id.in_(profile_ids)))
         profiles = {p.id: p for p in prof_result.scalars().all()}
 
+    custom_fields: list[EventRegistrationField] = []
+    field_resp_map: dict[tuple[uuid.UUID, uuid.UUID], Any] = {}
+    if event_id and registrations:
+        cf_res = await db.execute(
+            select(EventRegistrationField)
+            .where(
+                EventRegistrationField.event_id == event_id,
+                EventRegistrationField.source == RegistrationFieldSource.CUSTOM,
+            )
+            .order_by(EventRegistrationField.display_order)
+        )
+        custom_fields = list(cf_res.scalars().all())
+
+        reg_ids = [r.id for r in registrations]
+        fr_res = await db.execute(
+            select(RegistrationFieldResponse).where(RegistrationFieldResponse.registration_id.in_(reg_ids))
+        )
+        for fr in fr_res.scalars().all():
+            field_resp_map[(fr.registration_id, fr.field_id)] = fr.value
+
+    headers = list(REGISTRATION_EXPORT_HEADERS)
+    for cf in custom_fields:
+        headers.append(f"Field: {cf.label}")
+
     rows = []
     for r in registrations:
         reg_type = derive_registration_type(r)
@@ -438,9 +522,10 @@ async def _get_registration_export_data(
             members_summary = []
             for m in _active_team_members(r.team):
                 m_prof = profiles.get(m.profile_id) if m.profile_id else None
-                m_name = m_prof.full_name if m_prof else "Unknown"
+                m_name = (m_prof.full_name if m_prof else m.full_name) or "Unknown"
                 m_role = m.role.value if hasattr(m.role, "value") else str(m.role)
-                m_phone = f", {m_prof.phone}" if (m_prof and m_prof.phone) else ""
+                phone_val = (m_prof.phone if m_prof else m.phone) or ""
+                m_phone = f", {phone_val}" if phone_val else ""
                 members_summary.append(f"{m_name} ({m_role}{m_phone})")
             roster_str = "; ".join(members_summary)
 
@@ -466,34 +551,38 @@ async def _get_registration_export_data(
         status_val = r.status.value if hasattr(r.status, "value") else str(r.status)
         created_str = r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else ""
 
-        rows.append(
-            [
-                str(r.id),
-                str(r.event_id),
-                event_name,
-                reg_type,
-                status_val,
-                participant_name,
-                contact_email,
-                phone,
-                college,
-                department,
-                year,
-                team_id_str,
-                team_name,
-                active_count,
-                roster_str,
-                payment_id_str,
-                payment_status_str,
-                amount_inr,
-                payment_type_str,
-                order_id,
-                payment_tx_id,
-                created_str,
-            ]
-        )
+        row = [
+            str(r.id),
+            str(r.event_id),
+            event_name,
+            reg_type,
+            status_val,
+            participant_name,
+            contact_email,
+            phone,
+            college,
+            department,
+            year,
+            team_id_str,
+            team_name,
+            active_count,
+            roster_str,
+            payment_id_str,
+            payment_status_str,
+            amount_inr,
+            payment_type_str,
+            order_id,
+            payment_tx_id,
+            created_str,
+        ]
+        for cf in custom_fields:
+            val = field_resp_map.get((r.id, cf.id), "")
+            if isinstance(val, (list, dict)):
+                val = json.dumps(val)
+            row.append(val)
+        rows.append(row)
 
-    return REGISTRATION_EXPORT_HEADERS, rows
+    return headers, rows
 
 
 async def export_registrations_xlsx(db: AsyncSession, event_id: Optional[uuid.UUID] = None) -> BytesIO:
@@ -681,6 +770,31 @@ def serialize_admin_registration_team(
     }
 
 
+async def attach_field_responses_to_registrations(
+    db: AsyncSession, registrations: list[Registration]
+) -> None:
+    if not registrations:
+        return
+    reg_ids = [r.id for r in registrations]
+    result = await db.execute(
+        select(RegistrationFieldResponse)
+        .options(selectinload(RegistrationFieldResponse.field))
+        .where(RegistrationFieldResponse.registration_id.in_(reg_ids))
+    )
+    grouped: dict[uuid.UUID, list[FieldResponseOut]] = {rid: [] for rid in reg_ids}
+    for row in result.scalars().all():
+        grouped[row.registration_id].append(
+            FieldResponseOut(
+                field_id=row.field_id,
+                field_key=row.field.field_key if row.field else None,
+                label=row.field.label if row.field else None,
+                value=row.value,
+            )
+        )
+    for registration in registrations:
+        registration.field_responses = grouped.get(registration.id, [])
+
+
 def serialize_admin_registration(registration: Registration) -> dict[str, Any]:
     registration_type = derive_registration_type(registration)
     payment = registration.payment
@@ -688,6 +802,8 @@ def serialize_admin_registration(registration: Registration) -> dict[str, Any]:
     team_payload = None
     if registration_type == "TEAM" and registration.team is not None:
         team_payload = serialize_admin_registration_team(registration.team, rules)
+
+    field_responses = getattr(registration, "field_responses", []) or []
 
     return {
         "id": registration.id,
@@ -701,5 +817,8 @@ def serialize_admin_registration(registration: Registration) -> dict[str, Any]:
         "payment_status": payment.status if payment is not None else None,
         "payment": serialize_admin_registration_payment(payment),
         "team": team_payload,
+        "field_responses": [
+            fr.model_dump() if hasattr(fr, "model_dump") else fr for fr in field_responses
+        ],
         "created_at": registration.created_at,
     }

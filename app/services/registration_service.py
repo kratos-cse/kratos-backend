@@ -29,9 +29,11 @@ from app.models.enums import (
     TeamStatus,
 )
 from app.models.event import Event, EventRegistrationRule
+from app.models.event_content import RegistrationFieldResponse
 from app.models.profile import Profile
 from app.models.registration import Registration
 from app.models.team import Team, TeamMember
+from app.schemas.event_content import FieldResponseOut
 from app.schemas.registration import RegistrationCreateRequest, RegistrationType
 from app.services import qr_service
 from app.services.field_response_validator import persist_field_responses, validate_and_prepare_responses
@@ -162,6 +164,25 @@ async def create_registration(
     return await get_registration_or_404(db, registration.id)
 
 
+async def _attach_registration_field_responses(
+    db: AsyncSession, registration: Registration
+) -> None:
+    resp_result = await db.execute(
+        select(RegistrationFieldResponse)
+        .options(selectinload(RegistrationFieldResponse.field))
+        .where(RegistrationFieldResponse.registration_id == registration.id)
+    )
+    registration.field_responses = [
+        FieldResponseOut(
+            field_id=r.field_id,
+            field_key=r.field.field_key if r.field else None,
+            label=r.field.label if r.field else None,
+            value=r.value,
+        )
+        for r in resp_result.scalars().all()
+    ]
+
+
 async def get_registration_or_404(db: AsyncSession, registration_id: uuid.UUID) -> Registration:
     result = await db.execute(
         select(Registration).options(*_REGISTRATION_LOAD_OPTS).where(Registration.id == registration_id)
@@ -169,6 +190,7 @@ async def get_registration_or_404(db: AsyncSession, registration_id: uuid.UUID) 
     registration = result.scalar_one_or_none()
     if registration is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Registration not found")
+    await _attach_registration_field_responses(db, registration)
     return registration
 
 
