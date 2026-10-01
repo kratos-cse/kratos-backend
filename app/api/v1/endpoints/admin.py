@@ -1,7 +1,7 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -14,6 +14,20 @@ from app.models.user import User
 from app.schemas.admin import AdminUserCreate, AdminUserUpdate, RoleCreate, RoleUpdate
 
 router = APIRouter(prefix="/admin", tags=["Admin Authentication / RBAC"])
+
+
+async def _resolve_user_id_for_admin_grant(db: AsyncSession, admin_in: AdminUserCreate) -> UUID:
+    if admin_in.user_id is not None:
+        return admin_in.user_id
+    normalized = str(admin_in.email).strip().lower()
+    result = await db.execute(select(User).where(func.lower(User.email) == normalized))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No account found for that email. The user must sign in with Google once first.",
+        )
+    return user.id
 
 
 @router.get("/me")
@@ -138,20 +152,22 @@ async def list_admin_users(
     _: AdminUser = Depends(require_super_admin),
 ):
     result = await db.execute(
-        select(AdminUser)
+        select(AdminUser, User.email)
+        .join(User, User.id == AdminUser.user_id)
         .options(selectinload(AdminUser.role))
         .offset(skip)
         .limit(min(limit, 100))
     )
-    admins = result.scalars().all()
+    rows = result.all()
     data = [
         {
             "admin_user_id": admin.id,
             "user_id": admin.user_id,
+            "email": email,
             "role": {"id": admin.role.id, "name": admin.role.name} if admin.role else None,
             "is_active": admin.is_active,
         }
-        for admin in admins
+        for admin, email in rows
     ]
     return {"status": "success", "data": data}
 
@@ -162,14 +178,15 @@ async def grant_admin_access(
     db: AsyncSession = Depends(get_db),
     _: AdminUser = Depends(require_super_admin),
 ):
-    user = await db.execute(select(User).where(User.id == admin_in.user_id))
+    user_id = await _resolve_user_id_for_admin_grant(db, admin_in)
+    user = await db.execute(select(User).where(User.id == user_id))
     if not user.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="User not found.")
     role = await db.execute(select(Role).where(Role.id == admin_in.role_id))
     if not role.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Role not found.")
 
-    new_admin = AdminUser(user_id=admin_in.user_id, role_id=admin_in.role_id, is_active=True)
+    new_admin = AdminUser(user_id=user_id, role_id=admin_in.role_id, is_active=True)
     db.add(new_admin)
     try:
         await db.commit()
@@ -178,7 +195,7 @@ async def grant_admin_access(
         await db.rollback()
         raise HTTPException(status_code=400, detail="User is already an admin.")
 
-    invalidate_admin_cache(admin_in.user_id)
+    invalidate_admin_cache(user_id)
     return {
         "status": "success",
         "data": {"admin_user_id": new_admin.id, "is_active": new_admin.is_active},

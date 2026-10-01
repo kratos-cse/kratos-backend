@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field, model_validator
 
 
 class RoleCreate(BaseModel):
@@ -18,8 +18,17 @@ class RoleUpdate(BaseModel):
 
 
 class AdminUserCreate(BaseModel):
-    user_id: UUID
+    user_id: Optional[UUID] = None
+    email: Optional[EmailStr] = None
     role_id: UUID
+
+    @model_validator(mode="after")
+    def user_id_xor_email(self) -> "AdminUserCreate":
+        has_user = self.user_id is not None
+        has_email = self.email is not None
+        if has_user == has_email:
+            raise ValueError("Provide exactly one of user_id or email.")
+        return self
 
 
 class AdminUserUpdate(BaseModel):
