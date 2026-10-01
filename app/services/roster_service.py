@@ -1,7 +1,7 @@
 """Roster limits derived from EventRegistrationRule.
 
-required_member_count + substitute_count is the explicit model.
-team_min_size / team_max_size stay synced for legacy capacity checks.
+Per-event team size is team_min_size .. team_max_size (inclusive, leader counts).
+required_member_count mirrors team_min_size; substitute_count = max - min for legacy fields.
 """
 from __future__ import annotations
 
@@ -15,6 +15,19 @@ _MANDATORY_ROLES = (TeamMemberRole.LEADER, TeamMemberRole.MEMBER)
 # Upper bounds for organizer-configured rosters (leader + teammates + substitutes).
 MAX_REQUIRED_MEMBERS = 30
 MAX_SUBSTITUTE_SLOTS = 20
+
+
+def team_size_bounds(rules: EventRegistrationRule) -> tuple[int, int]:
+    team_min = max(1, min(MAX_REQUIRED_MEMBERS, int(rules.team_min_size or rules.required_member_count or 1)))
+    team_max = max(
+        team_min,
+        min(MAX_REQUIRED_MEMBERS + MAX_SUBSTITUTE_SLOTS, int(rules.team_max_size or team_min)),
+    )
+    return team_min, team_max
+
+
+def count_active(members: list[TeamMember]) -> int:
+    return sum(1 for m in members if m.status in _ACTIVE)
 
 
 def sync_legacy_team_sizes(rules: EventRegistrationRule) -> None:
@@ -36,31 +49,30 @@ def apply_roster_to_rules(
     team_max_size: int | None = None,
 ) -> None:
     """
-    Prefer explicit roster fields. If only legacy min/max provided, map:
-      required = min, substitute = max(0, max - min)
+    Prefer team_min_size / team_max_size when provided. Legacy required + substitute_count
+    still supported for API clients.
     """
-    if required_member_count is not None or substitute_count is not None:
+    if team_min_size is not None or team_max_size is not None:
+        mn = max(1, int(team_min_size if team_min_size is not None else rules.team_min_size or 1))
+        mx = max(mn, int(team_max_size if team_max_size is not None else rules.team_max_size or mn))
+        mn = min(MAX_REQUIRED_MEMBERS, mn)
+        mx = min(MAX_REQUIRED_MEMBERS + MAX_SUBSTITUTE_SLOTS, mx)
+        rules.team_min_size = mn
+        rules.team_max_size = mx
+        rules.required_member_count = mn
+        rules.substitute_count = max(0, mx - mn)
+    elif required_member_count is not None or substitute_count is not None:
         if required_member_count is not None:
             rules.required_member_count = required_member_count
         if substitute_count is not None:
             rules.substitute_count = substitute_count
-    elif team_min_size is not None or team_max_size is not None:
-        mn = team_min_size if team_min_size is not None else rules.team_min_size
-        mx = team_max_size if team_max_size is not None else rules.team_max_size
-        rules.required_member_count = max(1, int(mn))
-        rules.substitute_count = max(0, int(mx) - int(mn))
-    sync_legacy_team_sizes(rules)
+        sync_legacy_team_sizes(rules)
 
 
 def roster_limits(rules: EventRegistrationRule) -> tuple[int, int, int]:
-    """Return (required, max_substitutes, total_roster)."""
-    required = max(1, int(getattr(rules, "required_member_count", None) or rules.team_min_size or 1))
-    substitutes = getattr(rules, "substitute_count", None)
-    if substitutes is None:
-        substitutes = max(0, int(rules.team_max_size or required) - required)
-    else:
-        substitutes = max(0, int(substitutes))
-    return required, substitutes, required + substitutes
+    """Return (minimum_members, optional_slots, maximum_members)."""
+    team_min, team_max = team_size_bounds(rules)
+    return team_min, max(0, team_max - team_min), team_max
 
 
 def count_mandatory(members: list[TeamMember]) -> int:
@@ -80,24 +92,34 @@ def count_substitutes(members: list[TeamMember]) -> int:
 
 
 def next_join_role(members: list[TeamMember], rules: EventRegistrationRule) -> TeamMemberRole:
-    """Assign MEMBER until mandatory filled, then SUBSTITUTE if slots remain."""
-    required, max_subs, _ = roster_limits(rules)
-    if count_mandatory(members) < required:
+    """Fill mandatory seats up to team_min, then optional members up to team_max."""
+    team_min, team_max = team_size_bounds(rules)
+    mandatory = count_mandatory(members)
+    active = count_active(members)
+    if mandatory < team_min:
         return TeamMemberRole.MEMBER
-    if count_substitutes(members) < max_subs:
+    if active < team_max:
+        return TeamMemberRole.MEMBER
+    _, max_subs, total = roster_limits(rules)
+    if count_substitutes(members) < max_subs and active < total + max_subs:
         return TeamMemberRole.SUBSTITUTE
     raise ValueError("roster_full")
 
 
 def can_add_role(members: list[TeamMember], rules: EventRegistrationRule, role: TeamMemberRole) -> bool:
-    required, max_subs, _ = roster_limits(rules)
+    team_min, team_max = team_size_bounds(rules)
+    mandatory = count_mandatory(members)
+    active = count_active(members)
     if role == TeamMemberRole.SUBSTITUTE:
+        _, max_subs, _ = roster_limits(rules)
         return count_substitutes(members) < max_subs
     if role in _MANDATORY_ROLES:
-        return count_mandatory(members) < required
+        if mandatory < team_min:
+            return True
+        return active < team_max
     return False
 
 
 def mandatory_met(members: list[TeamMember], rules: EventRegistrationRule) -> bool:
-    required, _, _ = roster_limits(rules)
-    return count_mandatory(members) >= required
+    team_min, _ = team_size_bounds(rules)
+    return count_mandatory(members) >= team_min

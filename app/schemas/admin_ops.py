@@ -50,6 +50,8 @@ class AdminEventCreate(BaseModel):
 
     @model_validator(mode="after")
     def sync_roster_team_sizes(self) -> "AdminEventCreate":
+        if self.team_max_size < self.team_min_size:
+            raise ValueError("team_max_size must be greater than or equal to team_min_size.")
         if self.required_member_count is not None or self.substitute_count is not None:
             req = max(1, min(MAX_REQUIRED_MEMBERS, int(self.required_member_count or self.team_min_size or 1)))
             if self.substitute_count is not None:
@@ -60,8 +62,13 @@ class AdminEventCreate(BaseModel):
             self.substitute_count = subs
             self.team_min_size = req
             self.team_max_size = req + subs
-        elif self.team_max_size < self.team_min_size:
-            raise ValueError("team_max_size must be greater than or equal to team_min_size.")
+        else:
+            mn = max(1, min(MAX_REQUIRED_MEMBERS, int(self.team_min_size)))
+            mx = max(mn, min(MAX_REQUIRED_MEMBERS + MAX_SUBSTITUTE_SLOTS, int(self.team_max_size)))
+            self.team_min_size = mn
+            self.team_max_size = mx
+            self.required_member_count = mn
+            self.substitute_count = mx - mn
         return self
 
 

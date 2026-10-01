@@ -96,20 +96,28 @@ def test_cannot_add_third_substitute():
     assert not can_add_role(members, _rules(5, 2), TeamMemberRole.SUBSTITUTE)
 
 
-def test_cannot_add_sixth_mandatory():
+def test_can_add_optional_member_before_team_max():
     members = [_member(TeamMemberRole.LEADER)] + [
         _member(TeamMemberRole.MEMBER) for _ in range(4)
     ]
+    assert can_add_role(members, _rules(5, 2), TeamMemberRole.MEMBER)
+    members += [_member(TeamMemberRole.MEMBER) for _ in range(2)]
     assert not can_add_role(members, _rules(5, 2), TeamMemberRole.MEMBER)
-    assert can_add_role(members, _rules(5, 2), TeamMemberRole.SUBSTITUTE)
 
 
-def test_next_join_role_fills_mandatory_then_substitute():
+def test_next_join_role_fills_to_team_max():
     rules = _rules(5, 2)
     members = [_member(TeamMemberRole.LEADER)]
     assert next_join_role(members, rules) == TeamMemberRole.MEMBER
     members += [_member(TeamMemberRole.MEMBER) for _ in range(4)]
-    assert next_join_role(members, rules) == TeamMemberRole.SUBSTITUTE
+    assert next_join_role(members, rules) == TeamMemberRole.MEMBER
+
+
+def test_min_3_max_4_optional_fourth_member():
+    rules = _rules(3, 1, team_min=3, team_max=4)
+    members = [_member(TeamMemberRole.LEADER)] + [_member(TeamMemberRole.MEMBER) for _ in range(2)]
+    assert mandatory_met(members, rules)
+    assert next_join_role(members, rules) == TeamMemberRole.MEMBER
 
 
 def test_substitutes_do_not_count_as_mandatory():
