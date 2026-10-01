@@ -87,6 +87,8 @@ class Settings(BaseSettings):
             url = url.replace("postgres://", "postgresql://", 1)
         if url.startswith("postgresql://") and "+asyncpg" not in url:
             url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        if "sslmode=" in url:
+            url = url.replace("sslmode=", "ssl=")
         return url
 
 

@@ -330,7 +330,10 @@ async def list_scans(
     result: Optional[AttendanceScanResult] = None,
     limit: int = 100,
     offset: int = 0,
+    scoped_event_ids: Optional[set[UUID]] = None,
 ) -> list[AttendanceScan]:
+    if scoped_event_ids is not None and not scoped_event_ids:
+        return []
     q = select(AttendanceScan).order_by(AttendanceScan.created_at.desc())
     if checkpoint_id:
         q = q.where(AttendanceScan.checkpoint_id == checkpoint_id)
@@ -342,15 +345,27 @@ async def list_scans(
         q = q.join(AttendanceCheckpoint, AttendanceScan.checkpoint_id == AttendanceCheckpoint.id).where(
             AttendanceCheckpoint.event_id == event_id
         )
+    elif scoped_event_ids is not None:
+        q = q.join(AttendanceCheckpoint, AttendanceScan.checkpoint_id == AttendanceCheckpoint.id).where(
+            AttendanceCheckpoint.event_id.in_(scoped_event_ids)
+        )
     q = q.limit(limit).offset(offset)
     rows = await db.execute(q)
     return list(rows.scalars().all())
 
 
-async def list_checkpoints(db: AsyncSession, event_id: Optional[UUID] = None) -> list[AttendanceCheckpoint]:
+async def list_checkpoints(
+    db: AsyncSession,
+    event_id: Optional[UUID] = None,
+    scoped_event_ids: Optional[set[UUID]] = None,
+) -> list[AttendanceCheckpoint]:
+    if scoped_event_ids is not None and not scoped_event_ids:
+        return []
     q = select(AttendanceCheckpoint).order_by(AttendanceCheckpoint.created_at.desc())
     if event_id:
         q = q.where(AttendanceCheckpoint.event_id == event_id)
+    elif scoped_event_ids is not None:
+        q = q.where(AttendanceCheckpoint.event_id.in_(scoped_event_ids))
     result = await db.execute(q)
     return list(result.scalars().all())
 

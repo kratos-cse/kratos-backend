@@ -2,6 +2,8 @@
 import csv
 import json
 import uuid
+from collections import defaultdict
+from datetime import datetime
 from io import BytesIO, StringIO
 from typing import Any, Optional
 
@@ -83,13 +85,17 @@ async def status_counts(db: AsyncSession, column, model) -> dict[str, int]:
 import time
 
 _DASHBOARD_CACHE_TTL_SEC = 10.0
-_dashboard_cache: dict[str, Any] = {"expires_at": 0.0, "payload": None}
+_dashboard_cache: dict[str, Any] = {
+    "expires_at": 0.0,
+    "payload": None,
+    "scoped": {},
+}
 
 
 def invalidate_dashboard_cache() -> None:
     _dashboard_cache["expires_at"] = 0.0
     _dashboard_cache["payload"] = None
-    _dashboard_cache["cache_key"] = None
+    _dashboard_cache["scoped"] = {}
 
 
 async def dashboard_payload(
@@ -98,13 +104,22 @@ async def dashboard_payload(
     scoped_event_ids: Optional[set[uuid.UUID]] = None,
 ) -> dict[str, Any]:
     now = time.monotonic()
-    cache_key = "all" if scoped_event_ids is None else f"scoped:{sorted(scoped_event_ids)}"
-    if (
-        _dashboard_cache.get("cache_key") == cache_key
-        and _dashboard_cache["payload"] is not None
-        and now < float(_dashboard_cache["expires_at"] or 0)
-    ):
-        return _dashboard_cache["payload"]
+    if scoped_event_ids is None:
+        if (
+            _dashboard_cache.get("payload") is not None
+            and now < float(_dashboard_cache.get("expires_at") or 0.0)
+        ):
+            return _dashboard_cache["payload"]
+    else:
+        cache_key = f"scoped:{sorted(scoped_event_ids)}"
+        scoped_cache = _dashboard_cache.setdefault("scoped", {})
+        entry = scoped_cache.get(cache_key)
+        if (
+            entry is not None
+            and entry.get("payload") is not None
+            and now < float(entry.get("expires_at", 0.0))
+        ):
+            return entry["payload"]
 
     event_filter = []
     if scoped_event_ids is not None:
@@ -185,9 +200,15 @@ async def dashboard_payload(
         "recent_registrations": recent_registrations,
         "recent_payments": recent_payments,
     }
-    _dashboard_cache["payload"] = payload
-    _dashboard_cache["cache_key"] = cache_key
-    _dashboard_cache["expires_at"] = now + _DASHBOARD_CACHE_TTL_SEC
+    if scoped_event_ids is None:
+        _dashboard_cache["payload"] = payload
+        _dashboard_cache["expires_at"] = now + _DASHBOARD_CACHE_TTL_SEC
+    else:
+        cache_key = f"scoped:{sorted(scoped_event_ids)}"
+        _dashboard_cache.setdefault("scoped", {})[cache_key] = {
+            "payload": payload,
+            "expires_at": now + _DASHBOARD_CACHE_TTL_SEC,
+        }
     return payload
 
 
@@ -425,16 +446,22 @@ def _format_worksheet(ws, headers: list[str], rows: list[list[Any]]):
 
 
 def _multi_sheet_workbook_bytes(
-    headers: list[str],
-    sheets_data: dict[str, list[list[Any]]],
+    headers: Optional[list[str]] = None,
+    sheets_data: Optional[dict[str, Any]] = None,
 ) -> BytesIO:
     wb = Workbook()
-    
+
     # Remove default sheet
     if "Sheet" in wb.sheetnames:
         wb.remove(wb["Sheet"])
-        
-    for title, rows in sheets_data.items():
+
+    sheets = sheets_data or {}
+    for title, val in sheets.items():
+        if isinstance(val, tuple):
+            sheet_headers, sheet_rows = val
+        else:
+            sheet_headers, sheet_rows = headers or [], val
+
         # Sheet titles max 31 chars and no invalid chars
         safe_title = "".join(c for c in title if c not in r"\/?*[]")[:31]
         if not safe_title:
@@ -444,21 +471,23 @@ def _multi_sheet_workbook_bytes(
         counter = 1
         while safe_title in wb.sheetnames:
             suffix = f" {counter}"
-            safe_title = base_title[:31 - len(suffix)] + suffix
+            safe_title = base_title[: 31 - len(suffix)] + suffix
             counter += 1
-            
+
         ws = wb.create_sheet(title=safe_title)
-        _format_worksheet(ws, headers, rows)
-        
+        _format_worksheet(ws, sheet_headers, sheet_rows)
+
     # If no sheets created, create an empty one
     if not wb.sheetnames:
         ws = wb.create_sheet(title="Registrations")
-        _format_worksheet(ws, headers, [])
+        _format_worksheet(ws, headers or [], [])
 
     buf = BytesIO()
     wb.save(buf)
     buf.seek(0)
     return buf
+
+
 def _workbook_bytes(
     headers: list[str],
     rows: list[list[Any]],
@@ -476,7 +505,6 @@ def _workbook_bytes(
 
 def _csv_bytes(headers: list[str], rows: list[list[Any]]) -> BytesIO:
     buf = BytesIO()
-    # Removed UTF-8 BOM as it can cause Google Sheets to parse all info in a single column
     text_io = StringIO()
     writer = csv.writer(text_io, dialect="excel")
     writer.writerow(headers)
@@ -487,7 +515,7 @@ def _csv_bytes(headers: list[str], rows: list[list[Any]]) -> BytesIO:
     return buf
 
 
-REGISTRATION_EXPORT_HEADERS = [
+BASE_REGISTRATION_HEADERS_START = [
     "Registration ID",
     "Event ID",
     "Event Name",
@@ -502,7 +530,9 @@ REGISTRATION_EXPORT_HEADERS = [
     "Team ID",
     "Team Name",
     "Active Members Count",
-    "Team Members Roster",
+]
+
+BASE_REGISTRATION_HEADERS_END = [
     "Payment ID",
     "Payment Status",
     "Amount (INR)",
@@ -512,14 +542,166 @@ REGISTRATION_EXPORT_HEADERS = [
     "Created At",
 ]
 
+REGISTRATION_EXPORT_HEADERS = (
+    BASE_REGISTRATION_HEADERS_START
+    + ["Team Members Roster"]
+    + BASE_REGISTRATION_HEADERS_END
+)
+
+
+def _sorted_active_team_members(team: Optional[Team]) -> list[TeamMember]:
+    if not team or not team.members:
+        return []
+    active = [
+        m for m in team.members
+        if m.status not in (TeamMemberStatus.LEFT, TeamMemberStatus.REMOVED)
+    ]
+    return sorted(
+        active,
+        key=lambda m: (
+            0 if m.role == TeamMemberRole.LEADER else 1,
+            m.joined_at or datetime.min,
+            str(m.id),
+        ),
+    )
+
+
+def _format_member_cell(
+    m: TeamMember,
+    profiles: dict[uuid.UUID, Profile],
+) -> str:
+    m_prof = profiles.get(m.profile_id) if m.profile_id else None
+    m_name = (m_prof.full_name if m_prof else m.full_name) or "Unknown"
+    m_role = m.role.value if hasattr(m.role, "value") else str(m.role)
+    phone_val = (m_prof.phone if m_prof else m.phone) or ""
+    m_phone = f", {phone_val}" if phone_val else ""
+    return f"{m_name} ({m_role}{m_phone})"
+
+
+def _get_event_member_columns_count(
+    event: Optional[Event],
+    event_registrations: list[Registration],
+) -> int:
+    rules = event.rules if event else None
+    predetermined = (
+        rules.team_max_size
+        if (rules and rules.team_max_size and rules.team_max_size > 1)
+        else 0
+    )
+    actual_max = max(
+        [len(_sorted_active_team_members(r.team)) for r in event_registrations if r.team]
+        or [0]
+    )
+    return max(predetermined, actual_max)
+
+
+def _build_registration_row(
+    r: Registration,
+    profiles: dict[uuid.UUID, Profile],
+    member_cols_count: int,
+    custom_fields: list[EventRegistrationField],
+    field_resp_map: dict[tuple[uuid.UUID, uuid.UUID], Any],
+) -> list[Any]:
+    reg_type = derive_registration_type(r)
+    event_name = r.event.name if r.event else ""
+
+    # Main contact: solo participant or team leader
+    main_profile: Optional[Profile] = None
+    if r.profile_id:
+        main_profile = profiles.get(r.profile_id)
+    elif r.team and r.team.leader_profile_id:
+        main_profile = profiles.get(r.team.leader_profile_id)
+
+    participant_name = main_profile.full_name if main_profile else ""
+    contact_email = main_profile.contact_email if main_profile else ""
+    phone = main_profile.phone if main_profile else ""
+    college = main_profile.college_name if main_profile else ""
+    department = main_profile.department if main_profile else ""
+    year = str(main_profile.year_of_study) if (main_profile and main_profile.year_of_study is not None) else ""
+
+    team_id_str = str(r.team_id) if r.team_id else ""
+    team_name = r.team.name if r.team else ""
+    active_members = _sorted_active_team_members(r.team) if r.team else []
+    active_count = len(active_members) if r.team else ""
+
+    payment_id_str = str(r.payment_id) if r.payment_id else ""
+    payment_status_str = (
+        r.payment.status.value
+        if (r.payment and hasattr(r.payment.status, "value"))
+        else (str(r.payment.status) if r.payment else "")
+    )
+    amount_inr = (
+        f"{r.payment.amount_paise / 100:.2f}"
+        if (r.payment and r.payment.amount_paise is not None)
+        else ""
+    )
+    payment_type_str = (
+        r.payment.payment_type.value
+        if (r.payment and hasattr(r.payment.payment_type, "value"))
+        else (str(r.payment.payment_type) if r.payment else "")
+    )
+    order_id = r.payment.razorpay_order_id if r.payment else ""
+    payment_tx_id = r.payment.razorpay_payment_id or "" if r.payment else ""
+
+    status_val = r.status.value if hasattr(r.status, "value") else str(r.status)
+    created_str = r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else ""
+
+    row_start = [
+        str(r.id),
+        str(r.event_id),
+        event_name,
+        reg_type,
+        status_val,
+        participant_name,
+        contact_email,
+        phone,
+        college,
+        department,
+        year,
+        team_id_str,
+        team_name,
+        active_count,
+    ]
+
+    member_cells = []
+    for i in range(member_cols_count):
+        if i < len(active_members):
+            member_cells.append(_format_member_cell(active_members[i], profiles))
+        else:
+            member_cells.append("")
+
+    row_end = [
+        payment_id_str,
+        payment_status_str,
+        amount_inr,
+        payment_type_str,
+        order_id,
+        payment_tx_id,
+        created_str,
+    ]
+
+    custom_cells = []
+    for cf in custom_fields:
+        val = field_resp_map.get((r.id, cf.id), "")
+        if isinstance(val, (list, dict)):
+            val = json.dumps(val)
+        custom_cells.append(val)
+
+    return row_start + member_cells + row_end + custom_cells
+
 
 async def _get_registration_export_data(
-    db: AsyncSession, event_id: Optional[uuid.UUID] = None
+    db: AsyncSession,
+    event_id: Optional[uuid.UUID] = None,
+    scoped_event_ids: Optional[set[uuid.UUID]] = None,
 ) -> tuple[list[str], list[list[Any]]]:
+    if scoped_event_ids is not None and not scoped_event_ids:
+        return list(REGISTRATION_EXPORT_HEADERS), []
+
     q = (
         select(Registration)
         .options(
-            selectinload(Registration.event),
+            selectinload(Registration.event).selectinload(Event.rules),
             selectinload(Registration.team).selectinload(Team.members),
             selectinload(Registration.payment),
         )
@@ -527,8 +709,10 @@ async def _get_registration_export_data(
     )
     if event_id:
         q = q.where(Registration.event_id == event_id)
+    elif scoped_event_ids is not None:
+        q = q.where(Registration.event_id.in_(scoped_event_ids))
     result = await db.execute(q)
-    registrations = result.scalars().all()
+    registrations = list(result.scalars().all())
 
     profile_ids: set[uuid.UUID] = set()
     for r in registrations:
@@ -548,7 +732,7 @@ async def _get_registration_export_data(
 
     custom_fields: list[EventRegistrationField] = []
     field_resp_map: dict[tuple[uuid.UUID, uuid.UUID], Any] = {}
-    if event_id and registrations:
+    if event_id:
         cf_res = await db.execute(
             select(EventRegistrationField)
             .where(
@@ -559,6 +743,7 @@ async def _get_registration_export_data(
         )
         custom_fields = list(cf_res.scalars().all())
 
+    if registrations:
         reg_ids = [r.id for r in registrations]
         fr_res = await db.execute(
             select(RegistrationFieldResponse).where(RegistrationFieldResponse.registration_id.in_(reg_ids))
@@ -566,124 +751,161 @@ async def _get_registration_export_data(
         for fr in fr_res.scalars().all():
             field_resp_map[(fr.registration_id, fr.field_id)] = fr.value
 
-    headers = list(REGISTRATION_EXPORT_HEADERS)
-    for cf in custom_fields:
-        headers.append(f"Field: {cf.label}")
+    if event_id:
+        target_event = registrations[0].event if registrations else None
+        if not target_event:
+            ev_res = await db.execute(
+                select(Event).options(selectinload(Event.rules)).where(Event.id == event_id)
+            )
+            target_event = ev_res.scalar_one_or_none()
 
-    rows = []
-    for r in registrations:
-        reg_type = derive_registration_type(r)
-        event_name = r.event.name if r.event else ""
-
-        # Main contact: solo participant or team leader
-        main_profile: Optional[Profile] = None
-        if r.profile_id:
-            main_profile = profiles.get(r.profile_id)
-        elif r.team and r.team.leader_profile_id:
-            main_profile = profiles.get(r.team.leader_profile_id)
-
-        participant_name = main_profile.full_name if main_profile else ""
-        contact_email = main_profile.contact_email if main_profile else ""
-        phone = main_profile.phone if main_profile else ""
-        college = main_profile.college_name if main_profile else ""
-        department = main_profile.department if main_profile else ""
-        year = str(main_profile.year_of_study) if (main_profile and main_profile.year_of_study is not None) else ""
-
-        team_id_str = str(r.team_id) if r.team_id else ""
-        team_name = r.team.name if r.team else ""
-        active_count = len(_active_team_members(r.team)) if r.team else ""
-
-        roster_str = ""
-        if r.team:
-            members_summary = []
-            for m in _active_team_members(r.team):
-                m_prof = profiles.get(m.profile_id) if m.profile_id else None
-                m_name = (m_prof.full_name if m_prof else m.full_name) or "Unknown"
-                m_role = m.role.value if hasattr(m.role, "value") else str(m.role)
-                phone_val = (m_prof.phone if m_prof else m.phone) or ""
-                m_phone = f", {phone_val}" if phone_val else ""
-                members_summary.append(f"{m_name} ({m_role}{m_phone})")
-            roster_str = "; ".join(members_summary)
-
-        payment_id_str = str(r.payment_id) if r.payment_id else ""
-        payment_status_str = (
-            r.payment.status.value
-            if (r.payment and hasattr(r.payment.status, "value"))
-            else (str(r.payment.status) if r.payment else "")
+        member_cols = _get_event_member_columns_count(target_event, registrations)
+        headers = (
+            list(BASE_REGISTRATION_HEADERS_START)
+            + [f"Member {i}" for i in range(1, member_cols + 1)]
+            + list(BASE_REGISTRATION_HEADERS_END)
+            + [f"Field: {cf.label}" for cf in custom_fields]
         )
-        amount_inr = (
-            f"{r.payment.amount_paise / 100:.2f}"
-            if (r.payment and r.payment.amount_paise is not None)
-            else ""
-        )
-        payment_type_str = (
-            r.payment.payment_type.value
-            if (r.payment and hasattr(r.payment.payment_type, "value"))
-            else (str(r.payment.payment_type) if r.payment else "")
-        )
-        order_id = r.payment.razorpay_order_id if r.payment else ""
-        payment_tx_id = r.payment.razorpay_payment_id or "" if r.payment else ""
-
-        status_val = r.status.value if hasattr(r.status, "value") else str(r.status)
-        created_str = r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else ""
-
-        row = [
-            str(r.id),
-            str(r.event_id),
-            event_name,
-            reg_type,
-            status_val,
-            participant_name,
-            contact_email,
-            phone,
-            college,
-            department,
-            year,
-            team_id_str,
-            team_name,
-            active_count,
-            roster_str,
-            payment_id_str,
-            payment_status_str,
-            amount_inr,
-            payment_type_str,
-            order_id,
-            payment_tx_id,
-            created_str,
+        rows = [
+            _build_registration_row(r, profiles, member_cols, custom_fields, field_resp_map)
+            for r in registrations
         ]
-        for cf in custom_fields:
-            val = field_resp_map.get((r.id, cf.id), "")
-            if isinstance(val, (list, dict)):
-                val = json.dumps(val)
-            row.append(val)
-        rows.append(row)
+        return headers, rows
 
+    # Multi-event flat export (used primarily by CSV)
+    regs_by_ev = defaultdict(list)
+    for r in registrations:
+        regs_by_ev[r.event].append(r)
+    max_member_cols = max(
+        [_get_event_member_columns_count(ev, ev_regs) for ev, ev_regs in regs_by_ev.items()]
+        or [0]
+    )
+    headers = (
+        list(BASE_REGISTRATION_HEADERS_START)
+        + [f"Member {i}" for i in range(1, max_member_cols + 1)]
+        + list(BASE_REGISTRATION_HEADERS_END)
+    )
+    rows = [
+        _build_registration_row(r, profiles, max_member_cols, [], field_resp_map)
+        for r in registrations
+    ]
     return headers, rows
 
 
-async def export_registrations_xlsx(db: AsyncSession, event_id: Optional[uuid.UUID] = None) -> BytesIO:
-    headers, rows = await _get_registration_export_data(db, event_id=event_id)
-    
-    # Event name is at index 2 (REGISTRATION_EXPORT_HEADERS = ["Registration ID", "Event ID", "Event Name", ...])
-    event_name_idx = 2
-    
-    if event_id and rows:
-        # Single event export
-        event_name = rows[0][event_name_idx] or "Registrations"
+async def export_registrations_xlsx(
+    db: AsyncSession,
+    event_id: Optional[uuid.UUID] = None,
+    scoped_event_ids: Optional[set[uuid.UUID]] = None,
+) -> BytesIO:
+    if event_id:
+        headers, rows = await _get_registration_export_data(
+            db, event_id=event_id, scoped_event_ids=scoped_event_ids
+        )
+        event_name = "Registrations"
+        if rows and len(rows[0]) > 2 and rows[0][2]:
+            event_name = rows[0][2]
+        else:
+            ev_res = await db.execute(select(Event.name).where(Event.id == event_id))
+            ev_name = ev_res.scalar_one_or_none()
+            if ev_name:
+                event_name = ev_name
         return _workbook_bytes(headers, rows, sheet_title=event_name)
-    else:
-        # Multi-event export
-        from collections import defaultdict
-        grouped = defaultdict(list)
-        for row in rows:
-            ename = row[event_name_idx] or "Unknown Event"
-            grouped[ename].append(row)
-        
-        return _multi_sheet_workbook_bytes(headers, dict(grouped))
+
+    # Multi-event export:
+    ev_q = select(Event).options(selectinload(Event.rules)).order_by(Event.name)
+    if scoped_event_ids is not None:
+        if not scoped_event_ids:
+            return _multi_sheet_workbook_bytes(
+                headers=BASE_REGISTRATION_HEADERS_START + BASE_REGISTRATION_HEADERS_END,
+                sheets_data={},
+            )
+        ev_q = ev_q.where(Event.id.in_(scoped_event_ids))
+    events = list((await db.execute(ev_q)).scalars().all())
+
+    reg_q = (
+        select(Registration)
+        .options(
+            selectinload(Registration.event).selectinload(Event.rules),
+            selectinload(Registration.team).selectinload(Team.members),
+            selectinload(Registration.payment),
+        )
+        .order_by(Registration.created_at.desc())
+    )
+    if scoped_event_ids is not None:
+        reg_q = reg_q.where(Registration.event_id.in_(scoped_event_ids))
+    registrations = list((await db.execute(reg_q)).scalars().all())
+
+    profile_ids: set[uuid.UUID] = set()
+    for r in registrations:
+        if r.profile_id:
+            profile_ids.add(r.profile_id)
+        if r.team:
+            if r.team.leader_profile_id:
+                profile_ids.add(r.team.leader_profile_id)
+            for m in (r.team.members or []):
+                if m.profile_id:
+                    profile_ids.add(m.profile_id)
+    profiles = {}
+    if profile_ids:
+        prof_res = await db.execute(select(Profile).where(Profile.id.in_(profile_ids)))
+        profiles = {p.id: p for p in prof_res.scalars().all()}
+
+    event_ids = [e.id for e in events]
+    cf_map: dict[uuid.UUID, list[EventRegistrationField]] = defaultdict(list)
+    if event_ids:
+        cf_res = await db.execute(
+            select(EventRegistrationField)
+            .where(
+                EventRegistrationField.event_id.in_(event_ids),
+                EventRegistrationField.source == RegistrationFieldSource.CUSTOM,
+            )
+            .order_by(EventRegistrationField.display_order)
+        )
+        for cf in cf_res.scalars().all():
+            cf_map[cf.event_id].append(cf)
+
+    field_resp_map: dict[tuple[uuid.UUID, uuid.UUID], Any] = {}
+    if registrations:
+        reg_ids = [r.id for r in registrations]
+        fr_res = await db.execute(
+            select(RegistrationFieldResponse).where(RegistrationFieldResponse.registration_id.in_(reg_ids))
+        )
+        for fr in fr_res.scalars().all():
+            field_resp_map[(fr.registration_id, fr.field_id)] = fr.value
+
+    regs_by_event: dict[uuid.UUID, list[Registration]] = defaultdict(list)
+    for r in registrations:
+        regs_by_event[r.event_id].append(r)
+
+    sheets_data: dict[str, tuple[list[str], list[list[Any]]]] = {}
+    for ev in events:
+        ev_regs = regs_by_event.get(ev.id, [])
+        member_cols = _get_event_member_columns_count(ev, ev_regs)
+        ev_custom_fields = cf_map.get(ev.id, [])
+
+        sheet_headers = (
+            list(BASE_REGISTRATION_HEADERS_START)
+            + [f"Member {i}" for i in range(1, member_cols + 1)]
+            + list(BASE_REGISTRATION_HEADERS_END)
+            + [f"Field: {cf.label}" for cf in ev_custom_fields]
+        )
+        sheet_rows = [
+            _build_registration_row(r, profiles, member_cols, ev_custom_fields, field_resp_map)
+            for r in ev_regs
+        ]
+        sheets_data[ev.name] = (sheet_headers, sheet_rows)
+
+    return _multi_sheet_workbook_bytes(sheets_data=sheets_data)
 
 
-async def export_registrations_csv(db: AsyncSession, event_id: Optional[uuid.UUID] = None) -> BytesIO:
-    headers, rows = await _get_registration_export_data(db, event_id=event_id)
+async def export_registrations_csv(
+    db: AsyncSession,
+    event_id: Optional[uuid.UUID] = None,
+    scoped_event_ids: Optional[set[uuid.UUID]] = None,
+) -> BytesIO:
+    headers, rows = await _get_registration_export_data(
+        db, event_id=event_id, scoped_event_ids=scoped_event_ids
+    )
     return _csv_bytes(headers, rows)
 
 
@@ -726,12 +948,24 @@ async def export_payments_xlsx(db: AsyncSession) -> BytesIO:
     )
 
 
-async def export_attendance_xlsx(db: AsyncSession) -> BytesIO:
-    try:
-        result = await db.execute(select(AttendanceScan).order_by(AttendanceScan.scanned_at))
-        scans = result.scalars().all()
-    except Exception:
+async def export_attendance_xlsx(
+    db: AsyncSession,
+    event_id: Optional[uuid.UUID] = None,
+    scoped_event_ids: Optional[set[uuid.UUID]] = None,
+) -> BytesIO:
+    if scoped_event_ids is not None and not scoped_event_ids:
         scans = []
+    else:
+        try:
+            q = select(AttendanceScan).order_by(AttendanceScan.scanned_at)
+            if event_id:
+                q = q.where(AttendanceScan.event_id == event_id)
+            elif scoped_event_ids is not None:
+                q = q.where(AttendanceScan.event_id.in_(scoped_event_ids))
+            result = await db.execute(q)
+            scans = result.scalars().all()
+        except Exception:
+            scans = []
     rows = [
         [
             str(s.id),

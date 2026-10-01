@@ -1,7 +1,7 @@
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -10,6 +10,7 @@ from app.db.session import get_db
 from app.models.admin import AdminUser
 from app.models.enums import AttendanceScanResult, DuplicateScanBehavior
 from app.services import attendance_service
+from app.services.event_access_service import scoped_event_ids
 
 router = APIRouter(tags=["Attendance"])
 
@@ -50,6 +51,7 @@ def _scan_out(scan) -> dict | None:
         "checkpoint_id": scan.checkpoint_id,
         "qr_id": scan.qr_id,
         "profile_id": scan.profile_id,
+        "team_member_id": getattr(scan, "team_member_id", None),
         "result": scan.result,
         "scanned_by_admin_user_id": scan.scanned_by_admin_user_id,
         "note": scan.note,
@@ -88,7 +90,7 @@ async def attendance_scan(
 @router.get("/admin/attendance")
 async def list_attendance_scans(
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_permission("attendance-read")),
+    admin: AdminUser = Depends(require_permission("attendance-read")),
     event_id: Optional[uuid.UUID] = Query(None),
     checkpoint_id: Optional[uuid.UUID] = Query(None),
     profile_id: Optional[uuid.UUID] = Query(None),
@@ -96,6 +98,14 @@ async def list_attendance_scans(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ):
+    scoped = await scoped_event_ids(db, admin)
+    if event_id is not None and scoped is not None and event_id not in scoped:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not assigned to this event.",
+        )
+    if scoped is not None and not scoped:
+        return {"status": "success", "data": []}
     scans = await attendance_service.list_scans(
         db,
         event_id=event_id,
@@ -104,6 +114,7 @@ async def list_attendance_scans(
         result=result,
         limit=limit,
         offset=offset,
+        scoped_event_ids=scoped,
     )
     return {"status": "success", "data": [_scan_out(s) for s in scans]}
 
@@ -111,10 +122,20 @@ async def list_attendance_scans(
 @router.get("/admin/attendance/checkpoints")
 async def list_checkpoints(
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_permission("checkpoint-management", "attendance-read")),
+    admin: AdminUser = Depends(require_permission("checkpoint-management", "attendance-read")),
     event_id: Optional[uuid.UUID] = Query(None),
 ):
-    checkpoints = await attendance_service.list_checkpoints(db, event_id=event_id)
+    scoped = await scoped_event_ids(db, admin)
+    if event_id is not None and scoped is not None and event_id not in scoped:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not assigned to this event.",
+        )
+    if scoped is not None and not scoped:
+        return {"status": "success", "data": []}
+    checkpoints = await attendance_service.list_checkpoints(
+        db, event_id=event_id, scoped_event_ids=scoped
+    )
     return {"status": "success", "data": [_checkpoint_out(c) for c in checkpoints]}
 
 

@@ -45,8 +45,9 @@ from app.schemas.event_assignment import EventAssignmentCreate
 from app.services import admin_delete_service, admin_ops_service as ops
 from app.services import event_assignment_service as assignment_svc
 from app.services.event_access_service import require_event_access, scoped_event_ids
+from app.services.event_projection import build_event_state_from_remaining
 from app.services.registration_service import _already_registered
-from app.services.event_service import invalidate_events_list_cache, invalidate_spots_cache
+from app.services.event_service import batch_spots_remaining, invalidate_events_list_cache, invalidate_spots_cache
 from app.services.event_state import (
     close_registration,
     open_registration,
@@ -142,11 +143,13 @@ async def list_admin_events(
             return _success([])
         q = q.where(Event.id.in_(scoped))
     result = await db.execute(q)
+    rows = result.all()
+    valid_rows = [(event, rules) for event, rules in rows if rules]
+    remaining_by_event = await batch_spots_remaining(db, valid_rows)
     items = []
-    for event, rules in result.all():
-        if not rules:
-            continue
-        payload = await ops.event_to_dict_with_state(db, event, rules)
+    for event, rules in valid_rows:
+        payload = ops.event_to_dict(event, rules)
+        payload.update(build_event_state_from_remaining(event, rules, remaining_by_event.get(event.id)))
         items.append(payload)
     return _success(items)
 
@@ -693,16 +696,22 @@ async def export_registrations(
     event_id: Optional[UUID] = Query(default=None),
     format: str = Query(default="xlsx", pattern="^(xlsx|csv)$"),
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_permission("export")),
+    admin: AdminUser = Depends(require_permission("export")),
 ):
+    scoped = await scoped_event_ids(db, admin)
+    if event_id is not None and scoped is not None and event_id not in scoped:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not assigned to this event.",
+        )
     if format == "csv":
-        buf = await ops.export_registrations_csv(db, event_id=event_id)
+        buf = await ops.export_registrations_csv(db, event_id=event_id, scoped_event_ids=scoped)
         return StreamingResponse(
             buf,
             media_type="text/csv; charset=utf-8",
             headers={"Content-Disposition": "attachment; filename=registrations.csv"},
         )
-    buf = await ops.export_registrations_xlsx(db, event_id=event_id)
+    buf = await ops.export_registrations_xlsx(db, event_id=event_id, scoped_event_ids=scoped)
     return StreamingResponse(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -725,10 +734,17 @@ async def export_payments(
 
 @router.get("/exports/attendance")
 async def export_attendance(
+    event_id: Optional[UUID] = Query(default=None),
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_permission("export")),
+    admin: AdminUser = Depends(require_permission("export")),
 ):
-    buf = await ops.export_attendance_xlsx(db)
+    scoped = await scoped_event_ids(db, admin)
+    if event_id is not None and scoped is not None and event_id not in scoped:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not assigned to this event.",
+        )
+    buf = await ops.export_attendance_xlsx(db, event_id=event_id, scoped_event_ids=scoped)
     return StreamingResponse(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

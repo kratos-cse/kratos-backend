@@ -11,3 +11,6 @@ env/
 *.log
 .vscode/
 .idea/
+storage/
+graphify-out/
+benchmark_perf.py
