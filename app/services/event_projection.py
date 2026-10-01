@@ -4,6 +4,7 @@ from typing import Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.event import Event, EventRegistrationRule
+from app.services.roster_service import get_roster_style
 from app.services.event_service import (
     is_registration_open,
     registration_availability_for_event,
@@ -44,6 +45,7 @@ def build_event_state_from_remaining(
         "team_max_size": _rule_int(rules, "team_max_size", 1),
         "required_member_count": _rule_int(rules, "required_member_count", _rule_int(rules, "team_min_size", 1)),
         "substitute_count": _substitute_count(rules),
+        "roster_style": get_roster_style(rules) if rules else "FIXED",
     }
 
 

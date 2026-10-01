@@ -11,6 +11,13 @@ from app.models.admin import SUPER_ADMIN_ROLE_NAME, AdminUser, Role
 from app.models.attendance import AttendanceCheckpoint, AttendanceScan
 from app.models.enums import PaymentStatus, RegistrationStatus, TeamMemberStatus
 from app.models.event import Event, EventRegistrationRule
+from app.models.event_admin_assignment import EventAdminAssignment
+from app.models.event_content import (
+    EventContentSection,
+    EventCoordinator,
+    EventRegistrationField,
+    RegistrationFieldResponse,
+)
 from app.models.notification import Notification
 from app.models.payment import Payment
 from app.models.profile import Profile
@@ -181,6 +188,21 @@ async def admin_delete_team(db: AsyncSession, team_id: uuid.UUID, admin: AdminUs
     return {"id": str(team_id), "deleted": True}
 
 
+async def _purge_event_configuration(db: AsyncSession, event_id: uuid.UUID) -> None:
+    field_ids_result = await db.execute(
+        select(EventRegistrationField.id).where(EventRegistrationField.event_id == event_id)
+    )
+    field_ids = [row[0] for row in field_ids_result.all()]
+    if field_ids:
+        await db.execute(
+            delete(RegistrationFieldResponse).where(RegistrationFieldResponse.field_id.in_(field_ids))
+        )
+    await db.execute(delete(EventRegistrationField).where(EventRegistrationField.event_id == event_id))
+    await db.execute(delete(EventContentSection).where(EventContentSection.event_id == event_id))
+    await db.execute(delete(EventCoordinator).where(EventCoordinator.event_id == event_id))
+    await db.execute(delete(EventAdminAssignment).where(EventAdminAssignment.event_id == event_id))
+
+
 async def admin_delete_event(db: AsyncSession, event_id: uuid.UUID, admin: AdminUser) -> dict:
     event_result = await db.execute(select(Event).where(Event.id == event_id).with_for_update())
     event = event_result.scalar_one_or_none()
@@ -211,6 +233,7 @@ async def admin_delete_event(db: AsyncSession, event_id: uuid.UUID, admin: Admin
         await db.execute(delete(AttendanceScan).where(AttendanceScan.checkpoint_id.in_(cp_ids)))
         await db.execute(delete(AttendanceCheckpoint).where(AttendanceCheckpoint.id.in_(cp_ids)))
 
+    await _purge_event_configuration(db, event_id)
     await db.execute(delete(EventRegistrationRule).where(EventRegistrationRule.event_id == event_id))
     await db.execute(delete(Event).where(Event.id == event_id))
     await db.commit()

@@ -16,6 +16,31 @@ _MANDATORY_ROLES = (TeamMemberRole.LEADER, TeamMemberRole.MEMBER)
 MAX_REQUIRED_MEMBERS = 30
 MAX_SUBSTITUTE_SLOTS = 20
 
+ROSTER_STYLE_FIXED = "FIXED"
+ROSTER_STYLE_RANGE = "RANGE"
+ROSTER_STYLE_MEMBERS_SUBSTITUTES = "MEMBERS_SUBSTITUTES"
+
+
+def _rule_custom(rules: EventRegistrationRule) -> dict:
+    raw = getattr(rules, "custom_fields", None)
+    return raw if isinstance(raw, dict) else {}
+
+
+def set_roster_style(rules: EventRegistrationRule, style: str) -> None:
+    cf = dict(_rule_custom(rules))
+    cf["roster_style"] = style
+    rules.custom_fields = cf
+
+
+def get_roster_style(rules: EventRegistrationRule) -> str:
+    style = _rule_custom(rules).get("roster_style")
+    if style in (ROSTER_STYLE_FIXED, ROSTER_STYLE_RANGE, ROSTER_STYLE_MEMBERS_SUBSTITUTES):
+        return style
+    team_min, team_max = team_size_bounds(rules)
+    if team_min == team_max:
+        return ROSTER_STYLE_FIXED
+    return ROSTER_STYLE_RANGE
+
 
 def team_size_bounds(rules: EventRegistrationRule) -> tuple[int, int]:
     team_min = max(1, min(MAX_REQUIRED_MEMBERS, int(rules.team_min_size or rules.required_member_count or 1)))
@@ -47,31 +72,62 @@ def apply_roster_to_rules(
     substitute_count: int | None = None,
     team_min_size: int | None = None,
     team_max_size: int | None = None,
+    roster_style_value: str | None = None,
 ) -> None:
-    """
-    Prefer team_min_size / team_max_size when provided. Legacy required + substitute_count
-    still supported for API clients.
-    """
-    if team_min_size is not None or team_max_size is not None:
-        mn = max(1, int(team_min_size if team_min_size is not None else rules.team_min_size or 1))
-        mx = max(mn, int(team_max_size if team_max_size is not None else rules.team_max_size or mn))
-        mn = min(MAX_REQUIRED_MEMBERS, mn)
-        mx = min(MAX_REQUIRED_MEMBERS + MAX_SUBSTITUTE_SLOTS, mx)
-        rules.team_min_size = mn
-        rules.team_max_size = mx
-        rules.required_member_count = mn
-        rules.substitute_count = max(0, mx - mn)
-    elif required_member_count is not None or substitute_count is not None:
-        if required_member_count is not None:
-            rules.required_member_count = required_member_count
-        if substitute_count is not None:
-            rules.substitute_count = substitute_count
-        sync_legacy_team_sizes(rules)
+    style = roster_style_value or get_roster_style(rules)
+
+    if style == ROSTER_STYLE_MEMBERS_SUBSTITUTES:
+        req = max(
+            1,
+            min(
+                MAX_REQUIRED_MEMBERS,
+                int(required_member_count if required_member_count is not None else rules.required_member_count or 1),
+            ),
+        )
+        subs = max(
+            0,
+            min(
+                MAX_SUBSTITUTE_SLOTS,
+                int(substitute_count if substitute_count is not None else rules.substitute_count or 0),
+            ),
+        )
+        rules.required_member_count = req
+        rules.substitute_count = subs
+        rules.team_min_size = req
+        rules.team_max_size = req + subs
+        set_roster_style(rules, ROSTER_STYLE_MEMBERS_SUBSTITUTES)
+        return
+
+    if style == ROSTER_STYLE_FIXED:
+        size = team_min_size if team_min_size is not None else team_max_size
+        if size is None:
+            size = required_member_count if required_member_count is not None else rules.team_min_size
+        n = max(1, min(MAX_REQUIRED_MEMBERS, int(size or 1)))
+        rules.team_min_size = n
+        rules.team_max_size = n
+        rules.required_member_count = n
+        rules.substitute_count = 0
+        set_roster_style(rules, ROSTER_STYLE_FIXED)
+        return
+
+    # RANGE (min–max flexible roster)
+    mn = max(1, int(team_min_size if team_min_size is not None else rules.team_min_size or 1))
+    mx = max(mn, int(team_max_size if team_max_size is not None else rules.team_max_size or mn))
+    mn = min(MAX_REQUIRED_MEMBERS, mn)
+    mx = min(MAX_REQUIRED_MEMBERS + MAX_SUBSTITUTE_SLOTS, mx)
+    rules.team_min_size = mn
+    rules.team_max_size = mx
+    rules.required_member_count = mn
+    rules.substitute_count = max(0, mx - mn)
+    set_roster_style(rules, ROSTER_STYLE_RANGE)
 
 
 def roster_limits(rules: EventRegistrationRule) -> tuple[int, int, int]:
-    """Return (minimum_members, optional_slots, maximum_members)."""
+    """Return (minimum_members, substitute_slots, maximum_members)."""
     team_min, team_max = team_size_bounds(rules)
+    if get_roster_style(rules) == ROSTER_STYLE_MEMBERS_SUBSTITUTES:
+        subs = max(0, int(rules.substitute_count or 0))
+        return team_min, subs, team_max
     return team_min, max(0, team_max - team_min), team_max
 
 
@@ -92,30 +148,38 @@ def count_substitutes(members: list[TeamMember]) -> int:
 
 
 def next_join_role(members: list[TeamMember], rules: EventRegistrationRule) -> TeamMemberRole:
-    """Fill mandatory seats up to team_min, then optional members up to team_max."""
+    """Fill mandatory seats, then optional members (RANGE) or substitute slots (MEMBERS+SUBS)."""
+    style = get_roster_style(rules)
     team_min, team_max = team_size_bounds(rules)
     mandatory = count_mandatory(members)
     active = count_active(members)
     if mandatory < team_min:
         return TeamMemberRole.MEMBER
+    if style == ROSTER_STYLE_MEMBERS_SUBSTITUTES:
+        max_subs = max(0, int(rules.substitute_count or 0))
+        if count_substitutes(members) < max_subs and active < team_max:
+            return TeamMemberRole.SUBSTITUTE
+        raise ValueError("roster_full")
     if active < team_max:
         return TeamMemberRole.MEMBER
-    _, max_subs, total = roster_limits(rules)
-    if count_substitutes(members) < max_subs and active < total + max_subs:
-        return TeamMemberRole.SUBSTITUTE
     raise ValueError("roster_full")
 
 
 def can_add_role(members: list[TeamMember], rules: EventRegistrationRule, role: TeamMemberRole) -> bool:
+    style = get_roster_style(rules)
     team_min, team_max = team_size_bounds(rules)
     mandatory = count_mandatory(members)
     active = count_active(members)
     if role == TeamMemberRole.SUBSTITUTE:
-        _, max_subs, _ = roster_limits(rules)
-        return count_substitutes(members) < max_subs
+        if style != ROSTER_STYLE_MEMBERS_SUBSTITUTES:
+            return False
+        max_subs = max(0, int(rules.substitute_count or 0))
+        return mandatory >= team_min and count_substitutes(members) < max_subs and active < team_max
     if role in _MANDATORY_ROLES:
         if mandatory < team_min:
             return True
+        if style == ROSTER_STYLE_MEMBERS_SUBSTITUTES:
+            return False
         return active < team_max
     return False
 

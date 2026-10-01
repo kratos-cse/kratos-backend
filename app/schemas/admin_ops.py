@@ -1,7 +1,9 @@
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any, Literal, Optional
+
+RosterStyle = Literal["FIXED", "RANGE", "MEMBERS_SUBSTITUTES"]
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -46,6 +48,7 @@ class AdminEventCreate(BaseModel):
     requires_qr_checkin: bool = True
     capacity_type: CapacityType = CapacityType.PARTICIPANTS
     member_registration_mode: MemberRegistrationMode = MemberRegistrationMode.SELF_ENTRY
+    roster_style: Optional[RosterStyle] = None
     custom_fields: Optional[dict[str, Any]] = None
 
     @model_validator(mode="after")
@@ -93,6 +96,7 @@ class AdminEventUpdate(BaseModel):
 
 class AdminRegistrationRulesUpdate(BaseModel):
     registration_mode: Optional[RegistrationMode] = None
+    roster_style: Optional[RosterStyle] = None
     team_min_size: Optional[int] = Field(default=None, ge=1, le=MAX_REQUIRED_MEMBERS)
     team_max_size: Optional[int] = Field(
         default=None, ge=1, le=MAX_REQUIRED_MEMBERS + MAX_SUBSTITUTE_SLOTS

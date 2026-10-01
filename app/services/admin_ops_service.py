@@ -47,6 +47,7 @@ from app.services.roster_service import (
     apply_roster_to_rules,
     count_mandatory,
     count_substitutes,
+    get_roster_style,
     roster_limits,
     sync_legacy_team_sizes,
 )
@@ -252,6 +253,7 @@ def event_to_dict(event: Event, rules: EventRegistrationRule) -> dict[str, Any]:
             "team_max_size": rules.team_max_size,
             "required_member_count": getattr(rules, "required_member_count", rules.team_min_size),
             "substitute_count": getattr(rules, "substitute_count", max(0, rules.team_max_size - rules.team_min_size)),
+            "roster_style": get_roster_style(rules),
             "allow_individual": rules.allow_individual,
             "allow_team_invite_flow": rules.allow_team_invite_flow,
             "requires_qr_checkin": rules.requires_qr_checkin,

@@ -14,12 +14,22 @@ from app.services.roster_service import (
 )
 
 
-def _rules(required=5, substitutes=2, team_min=None, team_max=None):
+def _rules(required=5, substitutes=2, team_min=None, team_max=None, roster_style=None):
+    mn = team_min if team_min is not None else required
+    mx = team_max if team_max is not None else required + substitutes
+    style = roster_style
+    if style is None and mn == mx:
+        style = "FIXED"
+    elif style is None and substitutes > 0 and mx == required + substitutes:
+        style = "MEMBERS_SUBSTITUTES"
+    elif style is None:
+        style = "RANGE"
     return SimpleNamespace(
         required_member_count=required,
         substitute_count=substitutes,
-        team_min_size=team_min if team_min is not None else required,
-        team_max_size=team_max if team_max is not None else required + substitutes,
+        team_min_size=mn,
+        team_max_size=mx,
+        custom_fields={"roster_style": style},
     )
 
 
@@ -41,7 +51,12 @@ def test_sync_legacy_from_roster_fields():
 
 def test_apply_roster_prefers_explicit_fields():
     rules = _rules(1, 0, team_min=3, team_max=5)
-    apply_roster_to_rules(rules, required_member_count=5, substitute_count=2)
+    apply_roster_to_rules(
+        rules,
+        required_member_count=5,
+        substitute_count=2,
+        roster_style_value="MEMBERS_SUBSTITUTES",
+    )
     assert rules.required_member_count == 5
     assert rules.substitute_count == 2
     assert rules.team_min_size == 5
@@ -50,7 +65,7 @@ def test_apply_roster_prefers_explicit_fields():
 
 def test_apply_roster_maps_legacy_min_max():
     rules = _rules(1, 0, team_min=1, team_max=1)
-    apply_roster_to_rules(rules, team_min_size=4, team_max_size=6)
+    apply_roster_to_rules(rules, team_min_size=4, team_max_size=6, roster_style_value="RANGE")
     assert rules.required_member_count == 4
     assert rules.substitute_count == 2
     assert rules.team_max_size == 6
@@ -96,25 +111,26 @@ def test_cannot_add_third_substitute():
     assert not can_add_role(members, _rules(5, 2), TeamMemberRole.SUBSTITUTE)
 
 
-def test_can_add_optional_member_before_team_max():
+def test_range_can_add_optional_member_before_team_max():
     members = [_member(TeamMemberRole.LEADER)] + [
-        _member(TeamMemberRole.MEMBER) for _ in range(4)
+        _member(TeamMemberRole.MEMBER) for _ in range(2)
     ]
-    assert can_add_role(members, _rules(5, 2), TeamMemberRole.MEMBER)
-    members += [_member(TeamMemberRole.MEMBER) for _ in range(2)]
-    assert not can_add_role(members, _rules(5, 2), TeamMemberRole.MEMBER)
+    rules = _rules(3, 1, team_min=3, team_max=4, roster_style="RANGE")
+    assert can_add_role(members, rules, TeamMemberRole.MEMBER)
+    members += [_member(TeamMemberRole.MEMBER)]
+    assert not can_add_role(members, rules, TeamMemberRole.MEMBER)
 
 
-def test_next_join_role_fills_to_team_max():
-    rules = _rules(5, 2)
+def test_members_subs_next_join_role_uses_substitute():
+    rules = _rules(5, 2, roster_style="MEMBERS_SUBSTITUTES")
     members = [_member(TeamMemberRole.LEADER)]
     assert next_join_role(members, rules) == TeamMemberRole.MEMBER
     members += [_member(TeamMemberRole.MEMBER) for _ in range(4)]
-    assert next_join_role(members, rules) == TeamMemberRole.MEMBER
+    assert next_join_role(members, rules) == TeamMemberRole.SUBSTITUTE
 
 
 def test_min_3_max_4_optional_fourth_member():
-    rules = _rules(3, 1, team_min=3, team_max=4)
+    rules = _rules(3, 1, team_min=3, team_max=4, roster_style="RANGE")
     members = [_member(TeamMemberRole.LEADER)] + [_member(TeamMemberRole.MEMBER) for _ in range(2)]
     assert mandatory_met(members, rules)
     assert next_join_role(members, rules) == TeamMemberRole.MEMBER

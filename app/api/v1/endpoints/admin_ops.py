@@ -113,6 +113,7 @@ async def create_event(
     if body.registration_mode != RegistrationMode.INDIVIDUAL_ONLY:
         ops.apply_roster_to_rules(
             rules,
+            roster_style_value=body.roster_style,
             required_member_count=body.required_member_count,
             substitute_count=body.substitute_count,
             team_min_size=body.team_min_size,
@@ -211,13 +212,14 @@ async def patch_registration_rules(
         "team_min_size",
         "team_max_size",
     )
+    roster_style_value = data.pop("roster_style", None)
     roster_patch = {k: data.pop(k) for k in roster_keys if k in data}
     for field, value in data.items():
         setattr(rules, field, value)
     if mode is not None:
         ops.apply_registration_mode_to_rules(rules, mode)
-    if roster_patch and rules.registration_mode != RegistrationMode.INDIVIDUAL_ONLY:
-        ops.apply_roster_to_rules(rules, **roster_patch)
+    if (roster_patch or roster_style_value) and rules.registration_mode != RegistrationMode.INDIVIDUAL_ONLY:
+        ops.apply_roster_to_rules(rules, roster_style_value=roster_style_value, **roster_patch)
     await db.commit()
     await db.refresh(rules)
     invalidate_events_list_cache()
