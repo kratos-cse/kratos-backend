@@ -529,6 +529,28 @@ async def add_roster_member(
         if not payload.full_name or not payload.phone:
             raise AppError(ROSTER_INVALID, "full_name and phone are required for leader-entered members", status_code=400)
 
+        existing_phone = await db.execute(
+            select(TeamMember.id).where(
+                TeamMember.event_id == team.event_id,
+                TeamMember.phone == payload.phone,
+                TeamMember.status.notin_(_TERMINAL),
+            )
+        )
+        if existing_phone.scalar_one_or_none():
+            raise AppError(ALREADY_REGISTERED, "A participant with that phone number is already registered for this event", status_code=409)
+
+        existing_prof = await db.execute(
+            select(TeamMember.id)
+            .join(Profile, TeamMember.profile_id == Profile.id)
+            .where(
+                TeamMember.event_id == team.event_id,
+                Profile.phone == payload.phone,
+                TeamMember.status.notin_(_TERMINAL),
+            )
+        )
+        if existing_prof.scalar_one_or_none():
+            raise AppError(ALREADY_REGISTERED, "A participant with that phone number is already registered for this event", status_code=409)
+
     pending_member = TeamMember(
         team_id=team.id,
         event_id=team.event_id,
@@ -568,8 +590,7 @@ async def add_roster_member(
             raise AppError(TEAM_SUBSTITUTE_LIMIT, "No substitute slots remaining", status_code=409)
         raise AppError(TEAM_MANDATORY_FULL, "Mandatory roster is already full", status_code=409)
 
-    if member.profile_id:
-        await qr_service.generate_for_team_member(db, member.id)
+    await qr_service.generate_for_team_member(db, member.id)
 
     team_became_complete = False
     if mandatory_met(active, rules) and team.status == TeamStatus.PAID:
