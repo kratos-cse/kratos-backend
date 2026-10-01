@@ -3,7 +3,9 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.services.roster_service import MAX_REQUIRED_MEMBERS, MAX_SUBSTITUTE_SLOTS
 
 from app.models.enums import (
     CapacityType,
@@ -36,15 +38,31 @@ class AdminEventCreate(BaseModel):
     slot: Optional[EventSlot] = None
 
     registration_mode: RegistrationMode = RegistrationMode.TEAM_OR_INDIVIDUAL
-    team_min_size: int = Field(default=1, ge=1)
-    team_max_size: int = Field(default=1, ge=1)
-    required_member_count: Optional[int] = Field(default=None, ge=1)
-    substitute_count: Optional[int] = Field(default=None, ge=0)
+    team_min_size: int = Field(default=1, ge=1, le=MAX_REQUIRED_MEMBERS)
+    team_max_size: int = Field(default=1, ge=1, le=MAX_REQUIRED_MEMBERS + MAX_SUBSTITUTE_SLOTS)
+    required_member_count: Optional[int] = Field(default=None, ge=1, le=MAX_REQUIRED_MEMBERS)
+    substitute_count: Optional[int] = Field(default=None, ge=0, le=MAX_SUBSTITUTE_SLOTS)
     allow_team_invite_flow: bool = False
     requires_qr_checkin: bool = True
     capacity_type: CapacityType = CapacityType.PARTICIPANTS
     member_registration_mode: MemberRegistrationMode = MemberRegistrationMode.SELF_ENTRY
     custom_fields: Optional[dict[str, Any]] = None
+
+    @model_validator(mode="after")
+    def sync_roster_team_sizes(self) -> "AdminEventCreate":
+        if self.required_member_count is not None or self.substitute_count is not None:
+            req = max(1, min(MAX_REQUIRED_MEMBERS, int(self.required_member_count or self.team_min_size or 1)))
+            if self.substitute_count is not None:
+                subs = max(0, min(MAX_SUBSTITUTE_SLOTS, int(self.substitute_count)))
+            else:
+                subs = max(0, min(MAX_SUBSTITUTE_SLOTS, int(self.team_max_size) - int(self.team_min_size)))
+            self.required_member_count = req
+            self.substitute_count = subs
+            self.team_min_size = req
+            self.team_max_size = req + subs
+        elif self.team_max_size < self.team_min_size:
+            raise ValueError("team_max_size must be greater than or equal to team_min_size.")
+        return self
 
 
 class AdminEventUpdate(BaseModel):
@@ -68,10 +86,12 @@ class AdminEventUpdate(BaseModel):
 
 class AdminRegistrationRulesUpdate(BaseModel):
     registration_mode: Optional[RegistrationMode] = None
-    team_min_size: Optional[int] = Field(default=None, ge=1)
-    team_max_size: Optional[int] = Field(default=None, ge=1)
-    required_member_count: Optional[int] = Field(default=None, ge=1)
-    substitute_count: Optional[int] = Field(default=None, ge=0)
+    team_min_size: Optional[int] = Field(default=None, ge=1, le=MAX_REQUIRED_MEMBERS)
+    team_max_size: Optional[int] = Field(
+        default=None, ge=1, le=MAX_REQUIRED_MEMBERS + MAX_SUBSTITUTE_SLOTS
+    )
+    required_member_count: Optional[int] = Field(default=None, ge=1, le=MAX_REQUIRED_MEMBERS)
+    substitute_count: Optional[int] = Field(default=None, ge=0, le=MAX_SUBSTITUTE_SLOTS)
     allow_team_invite_flow: Optional[bool] = None
     requires_qr_checkin: Optional[bool] = None
     capacity_type: Optional[CapacityType] = None

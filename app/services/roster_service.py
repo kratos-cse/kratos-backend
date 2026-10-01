@@ -12,11 +12,15 @@ from app.models.team import TeamMember
 _ACTIVE = (TeamMemberStatus.ACTIVE, TeamMemberStatus.PENDING_PAYMENT)
 _MANDATORY_ROLES = (TeamMemberRole.LEADER, TeamMemberRole.MEMBER)
 
+# Upper bounds for organizer-configured rosters (leader + teammates + substitutes).
+MAX_REQUIRED_MEMBERS = 30
+MAX_SUBSTITUTE_SLOTS = 20
+
 
 def sync_legacy_team_sizes(rules: EventRegistrationRule) -> None:
     """Keep team_min/max aligned with roster fields."""
-    required = max(1, int(rules.required_member_count or 1))
-    substitutes = max(0, int(rules.substitute_count or 0))
+    required = max(1, min(MAX_REQUIRED_MEMBERS, int(rules.required_member_count or 1)))
+    substitutes = max(0, min(MAX_SUBSTITUTE_SLOTS, int(rules.substitute_count or 0)))
     rules.required_member_count = required
     rules.substitute_count = substitutes
     rules.team_min_size = required
