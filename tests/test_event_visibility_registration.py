@@ -16,7 +16,7 @@ pytestmark = requires_db
 
 
 @pytest.mark.asyncio
-async def test_publish_does_not_auto_open_registration(db):
+async def test_publish_sets_coming_soon_not_open(db):
     event = await _make_event(db, name="Publish Flow")
     event.visibility = EventVisibility.UNPUBLISHED
     event.registration_status = EventRegistrationStatus.CLOSED
@@ -26,7 +26,7 @@ async def test_publish_does_not_auto_open_registration(db):
     await db.flush()
 
     assert event.visibility == EventVisibility.PUBLISHED
-    assert event.registration_status == EventRegistrationStatus.CLOSED
+    assert event.registration_status == EventRegistrationStatus.COMING_SOON
 
 
 @pytest.mark.asyncio
@@ -53,6 +53,19 @@ async def test_cannot_open_registration_when_unpublished(db):
     with pytest.raises(HTTPException) as exc:
         open_registration(event)
     assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_published_coming_soon_availability(db):
+    event = await _make_event(db, name="Soon")
+    event.visibility = EventVisibility.PUBLISHED
+    event.registration_status = EventRegistrationStatus.COMING_SOON
+    rules = event.rules
+    await db.flush()
+
+    state = await build_event_state(db, event, rules)
+    assert state["registration_availability"] == RegistrationAvailability.COMING_SOON
+    assert state["registration_open"] is False
 
 
 @pytest.mark.asyncio

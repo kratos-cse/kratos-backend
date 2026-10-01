@@ -4,7 +4,7 @@ from typing import Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.event import Event, EventRegistrationRule
-from app.services.roster_service import get_roster_style
+from app.services.roster_service import ROSTER_STYLE_MEMBERS_SUBSTITUTES, get_roster_style
 from app.services.event_service import (
     is_registration_open,
     registration_availability_for_event,
@@ -19,6 +19,8 @@ def _rule_int(rules: Optional[EventRegistrationRule], attr: str, default: int) -
 
 def _substitute_count(rules: Optional[EventRegistrationRule]) -> int:
     if not rules:
+        return 0
+    if get_roster_style(rules) != ROSTER_STYLE_MEMBERS_SUBSTITUTES:
         return 0
     explicit = getattr(rules, "substitute_count", None)
     if explicit is not None:

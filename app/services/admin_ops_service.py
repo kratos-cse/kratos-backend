@@ -44,6 +44,7 @@ from app.schemas.event_content import FieldResponseOut
 from app.services import qr_service
 from app.services.event_slot import derive_event_slot
 from app.services.roster_service import (
+    ROSTER_STYLE_MEMBERS_SUBSTITUTES,
     apply_roster_to_rules,
     count_mandatory,
     count_substitutes,
@@ -252,7 +253,11 @@ def event_to_dict(event: Event, rules: EventRegistrationRule) -> dict[str, Any]:
             "team_min_size": rules.team_min_size,
             "team_max_size": rules.team_max_size,
             "required_member_count": getattr(rules, "required_member_count", rules.team_min_size),
-            "substitute_count": getattr(rules, "substitute_count", max(0, rules.team_max_size - rules.team_min_size)),
+            "substitute_count": (
+                int(getattr(rules, "substitute_count", 0) or 0)
+                if get_roster_style(rules) == ROSTER_STYLE_MEMBERS_SUBSTITUTES
+                else 0
+            ),
             "roster_style": get_roster_style(rules),
             "allow_individual": rules.allow_individual,
             "allow_team_invite_flow": rules.allow_team_invite_flow,

@@ -56,6 +56,8 @@ def resolve_registration_availability(
     """
     if event.visibility != EventVisibility.PUBLISHED:
         return RegistrationAvailability.CLOSED
+    if event.registration_status == EventRegistrationStatus.COMING_SOON:
+        return RegistrationAvailability.COMING_SOON
     if event.registration_status != EventRegistrationStatus.OPEN:
         return RegistrationAvailability.CLOSED
 

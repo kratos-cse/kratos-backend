@@ -50,6 +50,7 @@ from app.services.registration_service import _already_registered
 from app.services.event_service import batch_spots_remaining, invalidate_events_list_cache, invalidate_spots_cache
 from app.services.event_state import (
     close_registration,
+    mark_event_coming_soon,
     open_registration,
     publish_event,
     unpublish_event,
@@ -280,6 +281,21 @@ async def close_event_registration(
 ):
     event, rules = await ops.get_event_with_rules(db, event_id)
     close_registration(event)
+    await db.commit()
+    await db.refresh(event)
+    invalidate_events_list_cache()
+    invalidate_spots_cache(event.id)
+    return _success(await ops.event_to_dict_with_state(db, event, rules))
+
+
+@router.post("/events/{event_id}/coming-soon")
+async def mark_event_coming_soon_registration(
+    event_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _: AdminUser = Depends(require_super_admin),
+):
+    event, rules = await ops.get_event_with_rules(db, event_id)
+    mark_event_coming_soon(event)
     await db.commit()
     await db.refresh(event)
     invalidate_events_list_cache()

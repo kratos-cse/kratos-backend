@@ -118,7 +118,7 @@ def apply_roster_to_rules(
     rules.team_min_size = mn
     rules.team_max_size = mx
     rules.required_member_count = mn
-    rules.substitute_count = max(0, mx - mn)
+    rules.substitute_count = 0
     set_roster_style(rules, ROSTER_STYLE_RANGE)
 
 

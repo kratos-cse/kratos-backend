@@ -11,6 +11,7 @@ class EventRegistrationStatus(str, enum.Enum):
 
     OPEN = "OPEN"
     CLOSED = "CLOSED"
+    COMING_SOON = "COMING_SOON"
 
 
 class RegistrationAvailability(str, enum.Enum):
@@ -19,6 +20,7 @@ class RegistrationAvailability(str, enum.Enum):
     OPEN = "OPEN"
     CLOSED = "CLOSED"
     FULL = "FULL"
+    COMING_SOON = "COMING_SOON"
 
 
 class EventCategory(str, enum.Enum):

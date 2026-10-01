@@ -67,7 +67,7 @@ def test_apply_roster_maps_legacy_min_max():
     rules = _rules(1, 0, team_min=1, team_max=1)
     apply_roster_to_rules(rules, team_min_size=4, team_max_size=6, roster_style_value="RANGE")
     assert rules.required_member_count == 4
-    assert rules.substitute_count == 2
+    assert rules.substitute_count == 0
     assert rules.team_max_size == 6
 
 
