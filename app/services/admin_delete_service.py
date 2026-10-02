@@ -102,6 +102,29 @@ async def _purge_notifications(
     await db.execute(delete(Notification).where(or_(*clauses)))
 
 
+async def _purge_registration_field_responses(
+    db: AsyncSession,
+    *,
+    registration_id: Optional[uuid.UUID] = None,
+    team_id: Optional[uuid.UUID] = None,
+) -> None:
+    if registration_id is not None:
+        await db.execute(
+            delete(RegistrationFieldResponse).where(
+                RegistrationFieldResponse.registration_id == registration_id
+            )
+        )
+    if team_id is not None:
+        member_ids_result = await db.execute(select(TeamMember.id).where(TeamMember.team_id == team_id))
+        member_ids = [row[0] for row in member_ids_result.all()]
+        if member_ids:
+            await db.execute(
+                delete(RegistrationFieldResponse).where(
+                    RegistrationFieldResponse.team_member_id.in_(member_ids)
+                )
+            )
+
+
 async def _purge_payment_row(db: AsyncSession, payment_id: uuid.UUID) -> None:
     payment = await _get_payment(db, payment_id)
     if payment is None:
@@ -125,6 +148,9 @@ async def _purge_team_graph(db: AsyncSession, team_id: uuid.UUID, registration: 
         await _purge_payment_row(db, registration.payment_id)
 
     await db.execute(delete(TeamInvitation).where(TeamInvitation.team_id == team_id))
+    if registration:
+        await _purge_registration_field_responses(db, registration_id=registration.id)
+    await _purge_registration_field_responses(db, team_id=team_id)
     await db.execute(delete(TeamMember).where(TeamMember.team_id == team_id))
 
     # Registration.team_id FK must be cleared before teams row is removed.
@@ -147,6 +173,7 @@ async def _delete_registration_tree(db: AsyncSession, registration: Registration
     await _purge_notifications(db, registration_id=registration.id)
     if registration.payment_id:
         await _purge_payment_row(db, registration.payment_id)
+    await _purge_registration_field_responses(db, registration_id=registration.id)
     await db.execute(delete(Registration).where(Registration.id == registration.id))
 
 

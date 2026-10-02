@@ -5,7 +5,14 @@ import pytest
 from fastapi import HTTPException
 
 from app.models.admin import AdminUser
-from app.models.enums import PaymentStatus, PaymentType
+from app.models.enums import (
+    PaymentStatus,
+    PaymentType,
+    RegistrationFieldScope,
+    RegistrationFieldSource,
+    RegistrationFieldType,
+)
+from app.models.event_content import EventRegistrationField, RegistrationFieldResponse
 from app.services.admin_delete_service import admin_delete_registration
 
 from .conftest import (
@@ -16,6 +23,50 @@ from .conftest import (
     _make_user_profile,
     requires_db,
 )
+
+
+@requires_db
+@pytest.mark.asyncio
+async def test_delete_registration_removes_custom_field_responses(db):
+    from sqlalchemy import select
+
+    from app.models.registration import Registration
+
+    profile = await _make_user_profile(db, email=f"reg-del-fields-{uuid.uuid4().hex}@test.local")
+    event = await _make_event(db, name=f"Reg Del Fields {uuid.uuid4().hex[:6]}")
+    registration = await _make_solo_registration(db, event=event, profile=profile)
+
+    field = EventRegistrationField(
+        event_id=event.id,
+        scope=RegistrationFieldScope.REGISTRATION,
+        field_key="tshirt_size",
+        label="T-shirt size",
+        field_type=RegistrationFieldType.TEXT,
+        source=RegistrationFieldSource.CUSTOM,
+        required=False,
+        display_order=0,
+    )
+    db.add(field)
+    await db.flush()
+    db.add(
+        RegistrationFieldResponse(
+            field_id=field.id,
+            registration_id=registration.id,
+            value="M",
+        )
+    )
+    await db.flush()
+
+    admin = AdminUser(id=uuid.uuid4(), user_id=profile.user_id, role_id=uuid.uuid4(), is_active=True)
+    result = await admin_delete_registration(db, registration.id, admin)
+    assert result["deleted"] is True
+
+    gone_reg = await db.execute(select(Registration).where(Registration.id == registration.id))
+    assert gone_reg.scalar_one_or_none() is None
+    left = await db.execute(
+        select(RegistrationFieldResponse).where(RegistrationFieldResponse.registration_id == registration.id)
+    )
+    assert left.scalar_one_or_none() is None
 
 
 @requires_db
