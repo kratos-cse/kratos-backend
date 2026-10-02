@@ -14,6 +14,7 @@ from app.api.v1.endpoints import (
     qr,
     registrations,
     teams,
+    htf_admin,
 )
 
 api_router = APIRouter()
@@ -30,3 +31,4 @@ api_router.include_router(admin_audit.router)
 api_router.include_router(qr.router)
 api_router.include_router(notifications.router)
 api_router.include_router(attendance.router)
+api_router.include_router(htf_admin.router)
