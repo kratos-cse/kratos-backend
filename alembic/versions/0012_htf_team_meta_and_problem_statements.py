@@ -21,29 +21,34 @@ depends_on = None
 
 def upgrade() -> None:
     # ── 1. Enums ─────────────────────────────────────────────────────────────
-    htf_problem_domain = postgresql.ENUM(
-        "AI_ML",
-        "WEB_DEV",
-        "CYBER_SECURITY",
-        "IOT_EMBEDDED",
-        "BLOCKCHAIN",
-        "OPEN_INNOVATION",
-        name="htf_problem_domain",
-        create_type=True,
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'htf_problem_domain') THEN
+                CREATE TYPE htf_problem_domain AS ENUM (
+                    'AI_ML', 'WEB_DEV', 'CYBER_SECURITY', 'IOT_EMBEDDED', 'BLOCKCHAIN', 'OPEN_INNOVATION'
+                );
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'htf_application_status') THEN
+                CREATE TYPE htf_application_status AS ENUM (
+                    'DRAFT', 'SUBMITTED', 'SHORTLISTED', 'NOT_SHORTLISTED', 'CONFIRMED', 'WITHDRAWN'
+                );
+            END IF;
+        END$$;
+        """
     )
-    htf_problem_domain.create(op.get_bind(), checkfirst=True)
 
-    htf_application_status = postgresql.ENUM(
-        "DRAFT",
-        "SUBMITTED",
-        "SHORTLISTED",
-        "NOT_SHORTLISTED",
-        "CONFIRMED",
-        "WITHDRAWN",
-        name="htf_application_status",
-        create_type=True,
+    domain_enum = postgresql.ENUM(
+        "AI_ML", "WEB_DEV", "CYBER_SECURITY", "IOT_EMBEDDED", "BLOCKCHAIN", "OPEN_INNOVATION",
+        name="htf_problem_domain",
+        create_type=False,
     )
-    htf_application_status.create(op.get_bind(), checkfirst=True)
+    status_enum = postgresql.ENUM(
+        "DRAFT", "SUBMITTED", "SHORTLISTED", "NOT_SHORTLISTED", "CONFIRMED", "WITHDRAWN",
+        name="htf_application_status",
+        create_type=False,
+    )
 
     # ── 2. htf_problem_statements ────────────────────────────────────────────
     op.create_table(
@@ -58,20 +63,7 @@ def upgrade() -> None:
         sa.Column("code", sa.String(20), nullable=False),
         sa.Column("title", sa.String(300), nullable=False),
         sa.Column("description", sa.Text, nullable=True),
-        sa.Column(
-            "domain",
-            sa.Enum(
-                "AI_ML",
-                "WEB_DEV",
-                "CYBER_SECURITY",
-                "IOT_EMBEDDED",
-                "BLOCKCHAIN",
-                "OPEN_INNOVATION",
-                name="htf_problem_domain",
-                create_type=False,
-            ),
-            nullable=False,
-        ),
+        sa.Column("domain", domain_enum, nullable=False),
         sa.Column(
             "is_active",
             sa.Boolean,
@@ -121,21 +113,7 @@ def upgrade() -> None:
             sa.ForeignKey("htf_problem_statements.id"),
             nullable=True,
         ),
-        sa.Column(
-            "application_status",
-            sa.Enum(
-                "DRAFT",
-                "SUBMITTED",
-                "SHORTLISTED",
-                "NOT_SHORTLISTED",
-                "CONFIRMED",
-                "WITHDRAWN",
-                name="htf_application_status",
-                create_type=False,
-            ),
-            nullable=False,
-            server_default="DRAFT",
-        ),
+        sa.Column("application_status", status_enum, nullable=False, server_default="DRAFT"),
         sa.Column(
             "roster_locked",
             sa.Boolean,

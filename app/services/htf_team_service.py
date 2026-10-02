@@ -59,6 +59,7 @@ from app.core.errors import (
 from app.models.enums import (
     HTFApplicationStatus,
     HTFPassStatus,
+    TeamMemberEntrySource,
     TeamMemberRole,
     TeamMemberStatus,
     TeamStatus,
@@ -331,13 +332,7 @@ async def get_team_readiness(
 
     meta = await _get_meta_or_404(db, team.id)
 
-    # Load event for size limits
-    event_result = await db.execute(select(Event).where(Event.id == event_id))
-    event = event_result.scalar_one_or_none()
-    if not event or not event.rules:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Event rules not configured")
-
-    rules = event.rules
+    rules = await team_service._get_rules_or_404(db, event_id)
     min_size = rules.team_min_size
     max_size = rules.team_max_size
 
@@ -643,12 +638,7 @@ async def join_htf_team_via_invite(
     if not team_locked:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Team not found")
 
-    event_result = await db.execute(select(Event).where(Event.id == event_id))
-    event = event_result.scalar_one_or_none()
-    if not event or not event.rules:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Event rules not configured")
-
-    rules = event.rules
+    rules = await team_service._get_rules_or_404(db, event_id)
     active_count_result = await db.execute(
         select(func.count(TeamMember.id)).where(
             TeamMember.team_id == team.id,
@@ -659,13 +649,44 @@ async def join_htf_team_via_invite(
     if active_count >= rules.team_max_size:
         raise AppError(HTF_TEAM_FULL, "This team is already at full capacity", status_code=409)
 
-    # Delegate to the generic join — this handles field responses, QR, notifications
-    return await team_service.join_via_invitation(
-        db,
-        invite_code=invite_code,
-        profile=profile,
-        field_responses=[],
+    # Add member directly as ACTIVE (no upfront payment barrier for HTF)
+    member = TeamMember(
+        team_id=team.id,
+        event_id=team.event_id,
+        profile_id=profile.id,
+        role=TeamMemberRole.MEMBER,
+        status=TeamMemberStatus.ACTIVE,
+        entry_source=TeamMemberEntrySource.LINKED_ACCOUNT,
     )
+    db.add(member)
+    await db.flush()
+
+    # Pre-generate QR code for team member (pass activates once confirmed)
+    await qr_service.generate_for_team_member(db, member.id)
+
+    team_service.invalidate_spots_cache(team.event_id)
+
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+
+    await db.refresh(member)
+    await db.refresh(team)
+
+    return {
+        "team": {
+            "id": team.id,
+            "event_id": team.event_id,
+            "name": team.name,
+            "leader_profile_id": team.leader_profile_id,
+            "status": team.status,
+            "created_at": team.created_at,
+        },
+        "member": await team_service._to_member_out(member),
+        "registration_id": None,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
