@@ -8,6 +8,7 @@ from email.message import EmailMessage
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import formataddr
 from typing import Any, Optional, Sequence
 from uuid import UUID
 
@@ -141,34 +142,13 @@ def _html_from_plain(body: str, subject: str) -> str:
     )
 
 
-def _mailjet_configured() -> bool:
-    return bool(
-        settings.MAILJET_API_KEY
-        and settings.MAILJET_SECRET_KEY
-        and settings.MAILJET_FROM_EMAIL
-    )
-
-
-async def _send_email(
-    to_email: str,
-    subject: str,
-    body: str,
-    *,
-    html_body: Optional[str] = None,
-    inline_images: Optional[Sequence[tuple[str, str, bytes]]] = None,
-) -> tuple[bool, Optional[str]]:
-    """Prefer Mailjet when configured; otherwise fall back to SMTP."""
-    if _mailjet_configured():
-        from app.services.email_service import send_email
-
-        return await send_email(
-            to_email=to_email,
-            subject=subject,
-            text_body=body,
-            html_body=html_body,
-            inline_images=inline_images,
-        )
-    return await _send_smtp(to_email, subject, body, html_body=html_body, inline_images=inline_images)
+def _from_address() -> str:
+    """Format the sender address with optional display name."""
+    from_name = getattr(settings, "SMTP_FROM_NAME", "")
+    from_email = settings.SMTP_FROM
+    if from_name and from_email:
+        return formataddr((from_name, from_email))
+    return from_email
 
 
 async def _send_smtp(
@@ -184,7 +164,7 @@ async def _send_smtp(
 
     if inline_images:
         message = MIMEMultipart("related")
-        message["From"] = settings.SMTP_FROM
+        message["From"] = _from_address()
         message["To"] = to_email
         message["Subject"] = subject
         alt = MIMEMultipart("alternative")
@@ -201,13 +181,14 @@ async def _send_smtp(
             message.attach(img)
     else:
         message = EmailMessage()
-        message["From"] = settings.SMTP_FROM
+        message["From"] = _from_address()
         message["To"] = to_email
         message["Subject"] = subject
         message.set_content(body)
         if html_body:
             message.add_alternative(html_body, subtype="html")
 
+    password = settings.SMTP_PASSWORD.replace(" ", "").strip() if settings.SMTP_PASSWORD else None
     try:
         await asyncio.wait_for(
             aiosmtplib.send(
@@ -215,17 +196,31 @@ async def _send_smtp(
                 hostname=settings.SMTP_HOST,
                 port=settings.SMTP_PORT,
                 username=settings.SMTP_USER or None,
-                password=settings.SMTP_PASSWORD or None,
+                password=password,
                 start_tls=settings.SMTP_TLS,
-                timeout=10.0,
+                timeout=15.0,
             ),
-            timeout=15.0,
+            timeout=20.0,
         )
         return True, None
     except Exception as exc:
         logger.exception("SMTP send failed to=%s subject=%s", to_email, subject)
         err = str(exc).strip() or exc.__class__.__name__
         return False, err
+
+
+async def _send_email(
+    to_email: str,
+    subject: str,
+    body: str,
+    *,
+    html_body: Optional[str] = None,
+    inline_images: Optional[Sequence[tuple[str, str, bytes]]] = None,
+) -> tuple[bool, Optional[str]]:
+    """Send email via SMTP."""
+    return await _send_smtp(
+        to_email, subject, body, html_body=html_body, inline_images=inline_images
+    )
 
 
 async def _deliver_notification_bg(

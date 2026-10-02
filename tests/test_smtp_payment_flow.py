@@ -41,16 +41,13 @@ async def test_payment_success_sends_single_payment_notification(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_deliver_notification_uses_mailjet_when_configured(monkeypatch):
+async def test_deliver_notification_uses_smtp(monkeypatch):
     from app.core.config import settings
 
-    monkeypatch.setattr(settings, "MAILJET_API_KEY", "test-key")
-    monkeypatch.setattr(settings, "MAILJET_SECRET_KEY", "test-secret")
-    monkeypatch.setattr(settings, "MAILJET_FROM_EMAIL", "noreply@example.com")
+    monkeypatch.setattr(settings, "SMTP_HOST", "smtp.example.com")
+    monkeypatch.setattr(settings, "SMTP_FROM", "noreply@example.com")
 
-    mailjet_send = AsyncMock(return_value=(True, None))
     smtp_send = AsyncMock(return_value=(True, None))
-    monkeypatch.setattr("app.services.email_service.send_email", mailjet_send)
     monkeypatch.setattr(notification_service, "_send_smtp", smtp_send)
 
     ok, err = await notification_service._send_email(
@@ -62,5 +59,10 @@ async def test_deliver_notification_uses_mailjet_when_configured(monkeypatch):
 
     assert ok is True
     assert err is None
-    mailjet_send.assert_awaited_once()
-    smtp_send.assert_not_awaited()
+    smtp_send.assert_awaited_once_with(
+        "participant@example.com",
+        "Payment confirmed",
+        "Thanks for your payment.",
+        html_body="<p>Thanks</p>",
+        inline_images=None,
+    )

@@ -1,4 +1,4 @@
-"""Business-event entry points for Mailjet emails outside notification_service."""
+"""Business-event entry points for SMTP emails outside notification_service."""
 
 from app.services.email_service import send_email
 
@@ -10,7 +10,7 @@ async def trigger_email(
     text_body: str,
     html_body: str | None = None,
 ) -> tuple[bool, str | None]:
-    """Dispatch a business-triggered email through the Mailjet service."""
+    """Dispatch a business-triggered email through the SMTP email service."""
     return await send_email(
         to_email=to_email,
         subject=subject,
