@@ -8,6 +8,7 @@ from app.models.event_content import (  # noqa: F401
     EventRegistrationField,
     RegistrationFieldResponse,
 )
+from app.models.htf_team import HTFProblemStatement, HTFTeamMeta  # noqa: F401
 from app.models.notification import Notification  # noqa: F401
 from app.models.payment import Payment  # noqa: F401
 from app.models.profile import Profile  # noqa: F401

@@ -8,6 +8,7 @@ from app.api.v1.endpoints import (
     auth,
     event_config,
     events,
+    htf_teams,
     notifications,
     payments,
     profile,
@@ -30,3 +31,5 @@ api_router.include_router(admin_audit.router)
 api_router.include_router(qr.router)
 api_router.include_router(notifications.router)
 api_router.include_router(attendance.router)
+# ── HTF 2026 ────────────────────────────────────────────────────────────────
+api_router.include_router(htf_teams.router)
