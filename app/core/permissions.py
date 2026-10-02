@@ -18,6 +18,15 @@ ADMIN_MANAGEMENT = "admin-management"
 ROLE_MANAGEMENT = "role-management"
 DASHBOARD = "dashboard"
 
+# HTF Permissions
+HTF_APPLICATION_READ = "htf-application-read"
+HTF_APPLICATION_MANAGE = "htf-application-manage"
+HTF_SCREENING = "htf-screening"
+HTF_SHORTLIST = "htf-shortlist"
+HTF_PAYMENT_READ = "htf-payment-read"
+HTF_EXPORT = "htf-export"
+HTF_ANNOUNCEMENT = "htf-announcement"
+
 # Legacy keys retained for compatibility
 LEGACY_EVENT_MANAGEMENT = "event-management"
 LEGACY_EVENT_RULE_MANAGEMENT = "event-rule-management"
@@ -28,6 +37,7 @@ PERMISSION_ALIASES: dict[str, tuple[str, ...]] = {
     EVENT_EDIT: (LEGACY_EVENT_MANAGEMENT, LEGACY_EVENT_RULE_MANAGEMENT),
     EVENT_CONTROL: (LEGACY_EVENT_MANAGEMENT,),
     DASHBOARD: (),
+    HTF_APPLICATION_READ: (HTF_APPLICATION_MANAGE,),
 }
 
 EVENT_COORDINATOR_PERMISSIONS: frozenset[str] = frozenset(
@@ -37,6 +47,7 @@ EVENT_COORDINATOR_PERMISSIONS: frozenset[str] = frozenset(
         TEAM_READ,
         PARTICIPANT_READ,
         DASHBOARD,
+        HTF_APPLICATION_READ,
     }
 )
 
