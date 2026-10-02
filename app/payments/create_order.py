@@ -5,6 +5,7 @@ import uuid
 from typing import Callable, Optional
 from uuid import UUID
 
+import requests
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,7 +19,11 @@ from app.models.profile import Profile
 from app.models.registration import Registration
 from app.models.team import Team
 from app.payments.amounts import compute_amount_paise
-from app.payments.razorpay_client import get_razorpay, with_retry_async
+from app.payments.razorpay_client import (
+    get_razorpay,
+    razorpay_unavailable_message,
+    with_retry_async,
+)
 
 _BLOCK_NEW_ORDER = frozenset({PaymentStatus.PAID, PaymentStatus.REFUNDED})
 SyncPaymentFn = Callable[[AsyncSession, Payment], Payment]
@@ -168,19 +173,30 @@ async def create_payment_order(
         raise HTTPException(status_code=400, detail=str(err))
 
     receipt = f"kratos26_{uuid.uuid4().hex[:16]}"
-    order = await with_retry_async(
-        lambda: get_razorpay().order.create(
-            {
-                "amount": amount_paise,
-                "currency": "INR",
-                "receipt": receipt,
-                "notes": {
-                    "payment_type": payment_type.value,
-                    "event_id": str(event_id),
-                },
-            }
+    try:
+        order = await with_retry_async(
+            lambda: get_razorpay().order.create(
+                {
+                    "amount": amount_paise,
+                    "currency": "INR",
+                    "receipt": receipt,
+                    "notes": {
+                        "payment_type": payment_type.value,
+                        "event_id": str(event_id),
+                    },
+                }
+            )
         )
-    )
+    except requests.RequestException:
+        raise HTTPException(status_code=503, detail=razorpay_unavailable_message())
+    except Exception as err:
+        from razorpay.errors import BadRequestError, GatewayError, ServerError
+
+        if isinstance(err, (ServerError, GatewayError)):
+            raise HTTPException(status_code=503, detail=razorpay_unavailable_message())
+        if isinstance(err, BadRequestError):
+            raise HTTPException(status_code=400, detail="Could not create payment order. Check event fee settings.")
+        raise
 
     payment = Payment(
         payer_profile_id=payer.id,

@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     RAZORPAY_KEY_ID: str = ""
     RAZORPAY_KEY_SECRET: str = ""
     RAZORPAY_WEBHOOK_SECRET: str = ""
+    RAZORPAY_HTTP_TIMEOUT_CONNECT: float = 5.0
+    RAZORPAY_HTTP_TIMEOUT_READ: float = 30.0
 
     # --- Super Admin bootstrap (used by scripts/bootstrap_super_admin.py) ---
     SUPER_ADMIN_EMAIL: str = ""

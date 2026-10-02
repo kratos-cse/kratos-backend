@@ -44,13 +44,21 @@ from app.models.team import Team, TeamInvitation, TeamMember
 from app.schemas.team import RosterAddRequest, TeamUpdateRequest
 from app.services.event_service import invalidate_spots_cache, spots_remaining
 from app.services.roster_service import (
+    ROSTER_STYLE_MEMBERS_SUBSTITUTES,
     can_add_role,
     count_mandatory,
     count_substitutes,
+    get_roster_style,
     mandatory_met,
     next_join_role,
     roster_limits,
 )
+
+
+def _public_substitute_count(rules: EventRegistrationRule, max_subs: int) -> int:
+    if get_roster_style(rules) == ROSTER_STYLE_MEMBERS_SUBSTITUTES:
+        return max_subs
+    return 0
 
 _TERMINAL = (TeamMemberStatus.LEFT, TeamMemberStatus.REMOVED)
 _ACTIVE = (TeamMemberStatus.ACTIVE, TeamMemberStatus.PENDING_PAYMENT)
@@ -172,7 +180,8 @@ async def _to_detail(db: AsyncSession, team: Team, rules: EventRegistrationRule)
         "active_member_count": len(active),
         "team_max_size": total,
         "required_member_count": required,
-        "substitute_count": max_subs,
+        "substitute_count": _public_substitute_count(rules, max_subs),
+        "roster_style": get_roster_style(rules),
         "mandatory_filled": count_mandatory(active),
         "substitutes_filled": count_substitutes(active),
         "members": [await _to_member_out(m) for m in members],
@@ -323,7 +332,8 @@ async def get_invitation_public(db: AsyncSession, invite_code: str) -> dict:
         "active_member_count": active_count,
         "team_max_size": total,
         "required_member_count": required,
-        "substitute_count": max_subs,
+        "substitute_count": _public_substitute_count(rules, max_subs),
+        "roster_style": get_roster_style(rules),
         "is_full": active_count >= total,
         "is_active": invitation.is_active,
     }
