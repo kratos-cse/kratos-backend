@@ -22,10 +22,7 @@ def _substitute_count(rules: Optional[EventRegistrationRule]) -> int:
         return 0
     if get_roster_style(rules) != ROSTER_STYLE_MEMBERS_SUBSTITUTES:
         return 0
-    explicit = getattr(rules, "substitute_count", None)
-    if explicit is not None:
-        return int(explicit)
-    return max(0, int(rules.team_max_size) - int(rules.team_min_size))
+    return max(0, int(getattr(rules, "substitute_count", 0) or 0))
 
 
 def build_event_state_from_remaining(

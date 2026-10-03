@@ -33,9 +33,19 @@ def set_roster_style(rules: EventRegistrationRule, style: str) -> None:
 
 
 def get_roster_style(rules: EventRegistrationRule) -> str:
+    """Align with Admin-Frontend team_roster_style (FIXED | RANGE | MEMBERS_SUBSTITUTES).
+
+    Admin always saves substitute_count=0 for FIXED/RANGE. Rows with substitute_count>0
+    but a stale RANGE/FIXED style are normalized to MEMBERS_SUBSTITUTES.
+    """
+    subs = int(getattr(rules, "substitute_count", 0) or 0)
     style = _rule_custom(rules).get("roster_style")
     if style in (ROSTER_STYLE_FIXED, ROSTER_STYLE_RANGE, ROSTER_STYLE_MEMBERS_SUBSTITUTES):
+        if style in (ROSTER_STYLE_FIXED, ROSTER_STYLE_RANGE) and subs > 0:
+            return ROSTER_STYLE_MEMBERS_SUBSTITUTES
         return style
+    if subs > 0:
+        return ROSTER_STYLE_MEMBERS_SUBSTITUTES
     team_min, team_max = team_size_bounds(rules)
     if team_min == team_max:
         return ROSTER_STYLE_FIXED
@@ -128,7 +138,7 @@ def roster_limits(rules: EventRegistrationRule) -> tuple[int, int, int]:
     if get_roster_style(rules) == ROSTER_STYLE_MEMBERS_SUBSTITUTES:
         subs = max(0, int(rules.substitute_count or 0))
         return team_min, subs, team_max
-    return team_min, max(0, team_max - team_min), team_max
+    return team_min, 0, team_max
 
 
 def count_mandatory(members: list[TeamMember]) -> int:
