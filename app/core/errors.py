@@ -34,6 +34,18 @@ MISSING_REQUIRED_FIELD = "MISSING_REQUIRED_FIELD"
 INVALID_FIELD_VALUE = "INVALID_FIELD_VALUE"
 UNKNOWN_FIELD = "UNKNOWN_FIELD"
 
+# ── HTF 2026 Error Codes ─────────────────────────────────────────────────────
+HTF_ALREADY_IN_TEAM = "HTF_ALREADY_IN_TEAM"          # User already in another active HTF team
+HTF_TEAM_FULL = "HTF_TEAM_FULL"                      # Team at max capacity
+HTF_INVITE_INVALID = "HTF_INVITE_INVALID"            # Invite code absent / revoked
+HTF_TEAM_NOT_READY = "HTF_TEAM_NOT_READY"            # Size < min or profiles incomplete
+HTF_ROSTER_LOCKED = "HTF_ROSTER_LOCKED"              # Join/leave/remove blocked post-submission
+HTF_PASS_NOT_AVAILABLE = "HTF_PASS_NOT_AVAILABLE"    # Pass requested before CONFIRMED
+HTF_PS_NOT_FOUND = "HTF_PS_NOT_FOUND"                # Problem Statement ID doesn't exist
+HTF_PS_ALREADY_SELECTED = "HTF_PS_ALREADY_SELECTED"  # Another team already claimed this PS (if unique PS mode)
+HTF_APPLICATION_NOT_FOUND = "HTF_APPLICATION_NOT_FOUND"
+HTF_LEADER_ONLY = "HTF_LEADER_ONLY"                  # Action restricted to team leader
+
 
 class AppError(Exception):
     def __init__(self, code: str, message: str, status_code: int = 400) -> None:
