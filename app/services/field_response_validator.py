@@ -165,6 +165,7 @@ async def validate_and_prepare_responses(
     profile: Profile | None = None,
     team_member: TeamMember | None = None,
     member_profile: Profile | None = None,
+    enforce_required: bool = True,
 ) -> list[tuple[EventRegistrationField, Any]]:
     """Validate field responses; return (field, normalized_value) pairs for CUSTOM fields to persist."""
     fields = await load_visible_fields(db, event_id, scope)
@@ -190,7 +191,7 @@ async def validate_and_prepare_responses(
                 val = _profile_value(profile, key) if profile else None
             else:
                 val = _team_member_value(team_member, member_profile, key)
-            if field.required and _is_empty(val):
+            if enforce_required and field.required and _is_empty(val):
                 raise AppError(
                     MISSING_REQUIRED_FIELD,
                     f"Required field '{field.label}' is missing",
@@ -200,7 +201,7 @@ async def validate_and_prepare_responses(
 
         raw = submitted.get(field.id)
         if _is_empty(raw):
-            if field.required:
+            if enforce_required and field.required:
                 raise AppError(
                     MISSING_REQUIRED_FIELD,
                     f"Required field '{field.label}' is missing",

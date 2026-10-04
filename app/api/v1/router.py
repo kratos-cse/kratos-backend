@@ -8,6 +8,8 @@ from app.api.v1.endpoints import (
     auth,
     event_config,
     events,
+    htf_applications,
+    htf_dashboard,
     notifications,
     payments,
     profile,
@@ -23,6 +25,8 @@ api_router.include_router(events.router)
 api_router.include_router(registrations.router)
 api_router.include_router(teams.router)
 api_router.include_router(payments.router)
+api_router.include_router(htf_applications.router)
+api_router.include_router(htf_dashboard.router)
 api_router.include_router(admin.router)
 api_router.include_router(admin_ops.router)
 api_router.include_router(event_config.router)
