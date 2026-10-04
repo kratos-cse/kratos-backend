@@ -30,3 +30,14 @@ api_router.include_router(admin_audit.router)
 api_router.include_router(qr.router)
 api_router.include_router(notifications.router)
 api_router.include_router(attendance.router)
+
+# --- HTF 2026 Routers ---
+from app.htf.endpoints import (
+    admin_screening as htf_admin_screening,
+    payments as htf_payments,
+    submissions as htf_submissions,
+)
+
+api_router.include_router(htf_submissions.router)
+api_router.include_router(htf_admin_screening.router)
+api_router.include_router(htf_payments.router)
