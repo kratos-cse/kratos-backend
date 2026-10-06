@@ -25,6 +25,7 @@ from app.models.enums import (
     EventVisibility,
     MemberRegistrationMode,
     PaymentStatus,
+    PaymentType,
     RegistrationMode,
     RegistrationStatus,
     TeamMemberRole,
@@ -156,6 +157,11 @@ async def test_concurrent_team_join_one_slot(concurrent_engine):
 
 @pytest.mark.asyncio
 async def test_concurrent_event_capacity_one_slot(concurrent_engine):
+    """Pending registrations do not consume capacity; enforcement is at payment confirmation."""
+    from app.core.errors import CAPACITY_FULL
+    from app.payments.apply import apply_payment_success
+    from tests.conftest import _make_payment
+
     session_factory = _session_factory(concurrent_engine)
 
     async with session_factory() as db:
@@ -210,19 +216,68 @@ async def test_concurrent_event_capacity_one_slot(concurrent_engine):
         attempt_register(profile_a.id),
         attempt_register(profile_b.id),
     )
-    assert results.count("ok") == 1
-    assert 400 in results or "CAPACITY_FULL" in str(results)
+    assert results.count("ok") == 2
 
     async with session_factory() as db:
-        count = await db.scalar(
+        prof_a = await db.get(Profile, profile_a.id)
+        prof_b = await db.get(Profile, profile_b.id)
+        reg_a = await db.scalar(
+            select(Registration).where(
+                Registration.event_id == event_id,
+                Registration.profile_id == prof_a.id,
+            )
+        )
+        reg_b = await db.scalar(
+            select(Registration).where(
+                Registration.event_id == event_id,
+                Registration.profile_id == prof_b.id,
+            )
+        )
+        pay_a = await _make_payment(
+            db,
+            payer=prof_a,
+            payment_type=PaymentType.SOLO_REGISTRATION,
+            registration=reg_a,
+        )
+        pay_b = await _make_payment(
+            db,
+            payer=prof_b,
+            payment_type=PaymentType.SOLO_REGISTRATION,
+            registration=reg_b,
+        )
+        pay_a_id = pay_a.id
+        pay_b_id = pay_b.id
+        await db.commit()
+
+    async def attempt_confirm(payment_id: uuid.UUID):
+        async with session_factory() as db:
+            try:
+                await apply_payment_success(db, payment_id, f"rzp_{uuid.uuid4().hex}")
+                return "ok"
+            except AppError as exc:
+                await db.rollback()
+                return exc.code
+            except Exception:
+                await db.rollback()
+                return "error"
+
+    confirm_results = await asyncio.gather(
+        attempt_confirm(pay_a_id),
+        attempt_confirm(pay_b_id),
+    )
+    assert confirm_results.count("ok") == 1
+    assert CAPACITY_FULL in confirm_results
+
+    async with session_factory() as db:
+        confirmed = await db.scalar(
             select(func.count())
             .select_from(Registration)
             .where(
                 Registration.event_id == event_id,
-                Registration.status != RegistrationStatus.CANCELLED,
+                Registration.status == RegistrationStatus.CONFIRMED,
             )
         )
-        assert count == 1
+        assert confirmed == 1
 
 
 @pytest.mark.asyncio

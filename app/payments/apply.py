@@ -15,6 +15,7 @@ from app.models.team import Team, TeamMember
 from app.payments.handoffs import issue_receipt, trigger_qr
 from app.payments.reconciliation import log_payment_reconciliation, registration_linked_to_payment
 from app.services import notification_service
+from app.services.event_service import enforce_capacity_before_confirmation
 
 logger = logging.getLogger("payments.apply")
 
@@ -78,12 +79,19 @@ async def transition_payment_status(
 
 
 async def confirm_solo_registration(db: AsyncSession, payment_id: UUID) -> None:
-    await db.execute(
-        update(Registration)
-        .where(
+    reg_result = await db.execute(
+        select(Registration).where(
             Registration.payment_id == payment_id,
             Registration.status != RegistrationStatus.CANCELLED,
         )
+    )
+    registration = reg_result.scalar_one_or_none()
+    if registration is None:
+        return
+    await enforce_capacity_before_confirmation(db, registration)
+    await db.execute(
+        update(Registration)
+        .where(Registration.id == registration.id)
         .values(status=RegistrationStatus.CONFIRMED)
     )
 
@@ -151,6 +159,8 @@ async def confirm_team_registration(db: AsyncSession, payment_id: UUID, payer_pr
             registration.id,
         )
         return
+
+    await enforce_capacity_before_confirmation(db, registration)
 
     await db.execute(
         update(Team).where(Team.id == registration.team_id).values(status=TeamStatus.PAID)

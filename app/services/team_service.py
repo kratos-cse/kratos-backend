@@ -42,7 +42,11 @@ from app.models.profile import Profile
 from app.models.registration import Registration
 from app.models.team import Team, TeamInvitation, TeamMember
 from app.schemas.team import RosterAddRequest, TeamUpdateRequest
-from app.services.event_service import invalidate_spots_cache, spots_remaining
+from app.services.event_service import (
+    assert_event_has_participant_capacity,
+    invalidate_spots_cache,
+    spots_remaining,
+)
 from app.services.roster_service import (
     ROSTER_STYLE_MEMBERS_SUBSTITUTES,
     can_add_role,
@@ -395,6 +399,13 @@ async def join_via_invitation(
     active = _active_members(members)
     if len(active) >= total:
         raise AppError(TEAM_FULL, "Team is full", status_code=409)
+
+    reg_result = await db.execute(
+        select(Registration).where(Registration.team_id == team.id)
+    )
+    team_registration = reg_result.scalar_one_or_none()
+    if team_registration and team_registration.status == RegistrationStatus.CONFIRMED:
+        await assert_event_has_participant_capacity(db, team.event_id, additional_units=1)
 
     try:
         role = next_join_role(active, rules)

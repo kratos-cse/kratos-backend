@@ -4,9 +4,10 @@ from app.services.event_service import _count_used_capacity  # noqa: F401 — im
 
 # Document expected capacity semantics for reviewers / future integration tests.
 CAPACITY_SEMANTICS = {
-    "PARTICIPANTS": "solo non-cancelled registrations (profile_id set) + ACTIVE/PENDING_PAYMENT members",
-    "TEAMS": "non-CANCELLED teams only",
-    "no_double_count": "team Registration row is NOT counted as a participant",
+    "PARTICIPANTS": "CONFIRMED solo registrations + ACTIVE members on CONFIRMED team registrations",
+    "TEAMS": "CONFIRMED team registrations (team_id set) only",
+    "no_double_count": "team Registration row is NOT counted as a participant in PARTICIPANTS mode",
+    "pending": "PENDING registrations do not consume capacity until payment confirms",
 }
 
 

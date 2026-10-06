@@ -51,4 +51,17 @@ async def test_batch_spots_remaining_counts_solo_registrations(db):
     await db.flush()
 
     remaining = await batch_spots_remaining(db, [(event, rules)])
-    assert remaining[event.id] == 1
+    assert remaining[event.id] == 3
+
+    profile3 = await _make_user_profile(db, email=f"cap-conf-{uuid.uuid4().hex}@test.local")
+    db.add(
+        Registration(
+            event_id=event.id,
+            profile_id=profile3.id,
+            status=RegistrationStatus.CONFIRMED,
+        )
+    )
+    await db.flush()
+    invalidate_spots_cache()
+    remaining = await batch_spots_remaining(db, [(event, rules)])
+    assert remaining[event.id] == 2
