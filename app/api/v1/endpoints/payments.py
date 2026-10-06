@@ -21,6 +21,13 @@ from app.models.payment import Payment
 from app.models.profile import Profile
 from app.payments.apply import apply_payment_failure, apply_payment_success
 from app.payments.create_order import create_payment_order
+from app.payments.reconciliation import (
+    ReconcileOutcome,
+    reconcile_local_payment_state,
+    trace_payment,
+    trace_to_dict,
+)
+from app.payments.sync import sync_payment_from_razorpay
 from app.payments.razorpay_client import get_razorpay, with_retry_async
 from app.payments.admin_delete import admin_delete_payment
 from app.payments.refund import RefundError, refund_payment
@@ -48,6 +55,11 @@ class RefundBody(BaseModel):
     reason: str
 
 
+class ReconcileBody(BaseModel):
+    razorpay_order_id: Optional[str] = None
+    razorpay_payment_id: Optional[str] = None
+
+
 @router.post("/payments/create-order")
 async def create_order(
     body: CreateOrderBody,
@@ -60,7 +72,7 @@ async def create_order(
         payment_type=PaymentType(body.payment_type),
         payer=payer,
         registration_id=body.registration_id,
-        sync_payment=_sync_payment_if_needed,
+        sync_payment=sync_payment_from_razorpay,
     )
 
 
@@ -137,33 +149,6 @@ async def payments_webhook(request: Request, db: AsyncSession = Depends(get_db))
     return {"received": True, "applied": False}
 
 
-async def _sync_payment_if_needed(db: AsyncSession, payment: Payment) -> Payment:
-    if (
-        payment.status == PaymentStatus.CREATED
-        and payment.razorpay_order_id
-        and settings.RAZORPAY_KEY_ID
-        and settings.RAZORPAY_KEY_SECRET
-    ):
-        try:
-            order_payments = await with_retry_async(
-                lambda: get_razorpay().order.payments(payment.razorpay_order_id)
-            )
-            items = order_payments.get("items", [])
-            for item in items:
-                if item.get("status") in ("captured", "authorized"):
-                    applied = await apply_payment_success(db, payment.id, item["id"])
-                    if applied.applied:
-                        await db.refresh(payment)
-                        break
-        except Exception:
-            logger.exception(
-                "Payment sync failed for payment_id=%s order_id=%s",
-                payment.id,
-                payment.razorpay_order_id,
-            )
-    return payment
-
-
 @router.get("/payments/{payment_id}")
 async def get_payment(
     payment_id: UUID,
@@ -181,8 +166,6 @@ async def get_payment(
         )
         if admin_result.scalar_one_or_none() is None:
             raise HTTPException(status_code=403, detail="Not your payment")
-
-    payment = await _sync_payment_if_needed(db, payment)
 
     return {
         "id": str(payment.id),
@@ -221,13 +204,84 @@ async def sync_payment_status(
         if admin_result.scalar_one_or_none() is None:
             raise HTTPException(status_code=403, detail="Not your payment")
 
-    payment = await _sync_payment_if_needed(db, payment)
+    payment = await sync_payment_from_razorpay(db, payment)
     return {
         "id": str(payment.id),
         "status": payment.status.value,
         "razorpay_order_id": payment.razorpay_order_id,
         "razorpay_payment_id": payment.razorpay_payment_id,
     }
+
+
+@router.post("/payments/reconcile")
+async def reconcile_payment(
+    body: ReconcileBody,
+    db: AsyncSession = Depends(get_db),
+    payer: Profile = Depends(get_current_profile),
+):
+    """Explicit reconciliation for captured Razorpay payments (never mutates on GET registration)."""
+    from app.core.errors import PAYMENT_ORPHAN_CAPTURED, PAYMENT_RECONCILIATION_PENDING, AppError
+
+    if not body.razorpay_order_id and not body.razorpay_payment_id:
+        raise HTTPException(status_code=400, detail="razorpay_order_id or razorpay_payment_id is required")
+
+    if body.razorpay_order_id:
+        result = await db.execute(select(Payment).where(Payment.razorpay_order_id == body.razorpay_order_id))
+    else:
+        result = await db.execute(select(Payment).where(Payment.razorpay_payment_id == body.razorpay_payment_id))
+    payment = result.scalar_one_or_none()
+    if not payment:
+        raise HTTPException(status_code=404, detail="Unknown payment order")
+
+    if payment.payer_profile_id != payer.id:
+        admin_result = await db.execute(
+            select(AdminUser).where(AdminUser.user_id == payer.user_id, AdminUser.is_active.is_(True))
+        )
+        if admin_result.scalar_one_or_none() is None:
+            raise HTTPException(status_code=403, detail="Not your payment")
+
+    razorpay_payment_id = body.razorpay_payment_id
+    if not razorpay_payment_id and settings.RAZORPAY_KEY_ID and settings.RAZORPAY_KEY_SECRET:
+        try:
+            order_payments = await with_retry_async(
+                lambda: get_razorpay().order.payments(payment.razorpay_order_id)
+            )
+            for item in order_payments.get("items", []):
+                if item.get("status") in ("captured", "authorized"):
+                    razorpay_payment_id = item["id"]
+                    break
+        except Exception:
+            logger.exception("reconcile_razorpay_fetch_failed payment_id=%s", payment.id)
+
+    reconcile_result = await reconcile_local_payment_state(
+        db, payment, razorpay_payment_id=razorpay_payment_id
+    )
+    payload = {
+        "outcome": reconcile_result.outcome.value,
+        "applied": reconcile_result.applied,
+        "trace": trace_to_dict(reconcile_result.trace),
+    }
+
+    if reconcile_result.outcome == ReconcileOutcome.REGISTRATION_UNLINKED:
+        raise AppError(
+            PAYMENT_ORPHAN_CAPTURED,
+            "Payment captured but no registration is linked. Contact support with your payment reference.",
+            status_code=409,
+        )
+    if reconcile_result.outcome == ReconcileOutcome.REGISTRATION_CANCELLED:
+        raise AppError(
+            PAYMENT_ORPHAN_CAPTURED,
+            "Payment captured after registration was cancelled. Contact support for reconciliation.",
+            status_code=409,
+        )
+    if reconcile_result.outcome in (ReconcileOutcome.AMBIGUOUS, ReconcileOutcome.NOT_CAPTURED):
+        raise AppError(
+            PAYMENT_RECONCILIATION_PENDING,
+            "Payment reconciliation could not be completed yet. Try again shortly or contact support.",
+            status_code=409,
+        )
+
+    return payload
 
 
 @router.get("/payments/{payment_id}/receipt")

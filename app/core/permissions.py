@@ -36,6 +36,7 @@ EVENT_COORDINATOR_PERMISSIONS: frozenset[str] = frozenset(
         REGISTRATION_READ,
         TEAM_READ,
         PARTICIPANT_READ,
+        PAYMENT_READ,
         DASHBOARD,
     }
 )

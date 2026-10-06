@@ -32,6 +32,14 @@ async def refund_payment(db: AsyncSession, payment_id: UUID, reason: str) -> Ref
     payment = result.scalar_one_or_none()
     if not payment:
         raise RefundError(f"Payment {payment_id} not found", status=404)
+    if payment.status == PaymentStatus.REFUNDED:
+        if payment.refund_id:
+            return RefundResult(
+                payment_id=payment.id,
+                refund_id=payment.refund_id,
+                refund_amount_paise=payment.refund_amount_paise or payment.amount_paise,
+            )
+        raise RefundError(f"Payment {payment_id} is REFUNDED without refund metadata", status=409)
     if payment.status != PaymentStatus.PAID:
         raise RefundError(f"Payment {payment_id} is not PAID (status={payment.status})", status=409)
     if not payment.razorpay_payment_id:

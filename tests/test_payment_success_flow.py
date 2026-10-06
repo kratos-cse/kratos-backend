@@ -40,8 +40,7 @@ async def test_get_receipt_data_context_loads_registration_event(db, solo_paymen
     payment = setup["payment"]
     event = setup["event"]
 
-    payment.status = PaymentStatus.PAID
-    await db.flush()
+    await apply_payment_success(db, payment.id, f"pay_{uuid.uuid4().hex}")
 
     ctx = await get_receipt_data_context(db, payment.id)
 

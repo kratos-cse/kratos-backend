@@ -10,6 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from app.api.deps_admin import (
     get_current_active_admin,
+    require_mutation_admin,
     require_permission,
     require_scoped_event_access,
     require_super_admin,
@@ -39,12 +40,19 @@ from app.schemas.admin_ops import (
     AdminRegistrationRulesUpdate,
     AdminRegistrationUpdate,
     AdminTeamUpdate,
+    RecoverCapturedPaymentBody,
+    RecoverCapturedPaymentResult,
     TransferLeadershipBody,
 )
+from app.payments.admin_recover import PaymentRecoveryError, preview_recover_captured_payment, recover_captured_payment
 from app.schemas.event_assignment import EventAssignmentCreate
 from app.services import admin_delete_service, admin_ops_service as ops
 from app.services import event_assignment_service as assignment_svc
-from app.services.event_access_service import require_event_access, scoped_event_ids
+from app.services.event_access_service import (
+    require_event_access,
+    resolve_scoped_event_ids_for_collection,
+    scoped_event_ids,
+)
 from app.services.event_projection import build_event_state_from_remaining
 from app.services.registration_service import _already_registered
 from app.services.event_service import batch_spots_remaining, invalidate_events_list_cache, invalidate_spots_cache
@@ -306,7 +314,7 @@ async def mark_event_coming_soon_registration(
 @router.get("/event-coordinators")
 async def list_assignable_event_coordinators(
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_permission("event-assignment-management")),
+    _: AdminUser = Depends(require_super_admin),
 ):
     return _success(await assignment_svc.list_assignable_event_coordinators(db))
 
@@ -315,7 +323,7 @@ async def list_assignable_event_coordinators(
 async def list_event_admin_assignments(
     event_id: UUID,
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_permission("event-assignment-management")),
+    _: AdminUser = Depends(require_super_admin),
 ):
     assignments = await assignment_svc.list_event_assignments(db, event_id)
     return _success(await assignment_svc.enrich_assignments_with_user_info(db, assignments))
@@ -326,7 +334,7 @@ async def create_event_admin_assignment(
     event_id: UUID,
     body: EventAssignmentCreate,
     db: AsyncSession = Depends(get_db),
-    admin: AdminUser = Depends(require_permission("event-assignment-management")),
+    admin: AdminUser = Depends(require_super_admin),
 ):
     assignment = await assignment_svc.create_event_assignment(
         db, event_id, body.admin_user_id, admin.id
@@ -340,7 +348,7 @@ async def delete_event_admin_assignment(
     event_id: UUID,
     assignment_id: UUID,
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_permission("event-assignment-management")),
+    _: AdminUser = Depends(require_super_admin),
 ):
     await assignment_svc.delete_event_assignment(db, event_id, assignment_id)
 
@@ -363,10 +371,16 @@ async def list_participants(
     db: AsyncSession = Depends(get_db),
     admin: AdminUser = Depends(require_permission("participant-read")),
 ):
-    if event_id is not None:
-        await require_event_access(db, admin, event_id, "participant-read")
+    scoped = await resolve_scoped_event_ids_for_collection(
+        db, admin, event_id=event_id, permission="participant-read"
+    )
     profiles, total = await ops.search_participant_profiles(
-        db, q=q, event_id=event_id, skip=skip, limit=min(limit, 100)
+        db,
+        q=q,
+        event_id=event_id,
+        scoped_event_ids=scoped,
+        skip=skip,
+        limit=min(limit, 100),
     )
     data = [
         {
@@ -398,7 +412,8 @@ async def update_participant(
     profile_id: UUID,
     body: AdminParticipantUpdate,
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_permission("participant-edit")),
+    _: AdminUser = Depends(require_mutation_admin),
+    __: AdminUser = Depends(require_permission("participant-edit")),
 ):
     result = await db.execute(select(Profile).where(Profile.id == profile_id))
     profile = result.scalar_one_or_none()
@@ -425,7 +440,8 @@ async def update_participant(
 async def manual_register_participant(
     body: AdminManualRegister,
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_permission("participant-registration", "participant-edit")),
+    _: AdminUser = Depends(require_mutation_admin),
+    __: AdminUser = Depends(require_permission("participant-registration", "participant-edit")),
 ):
     profile_result = await db.execute(select(Profile).where(Profile.id == body.profile_id))
     if not profile_result.scalar_one_or_none():
@@ -466,9 +482,9 @@ async def list_teams(
     db: AsyncSession = Depends(get_db),
     admin: AdminUser = Depends(require_permission("team-read")),
 ):
-    scoped = await scoped_event_ids(db, admin)
-    if event_id is not None:
-        await require_event_access(db, admin, event_id, "team-read")
+    scoped = await resolve_scoped_event_ids_for_collection(
+        db, admin, event_id=event_id, permission="team-read"
+    )
     q = (
         select(Team, Event.name)
         .join(Event, Team.event_id == Event.id)
@@ -476,27 +492,34 @@ async def list_teams(
     )
     if scoped is not None:
         if not scoped:
-            return _success([])
+            return _success({"items": [], "total": 0, "skip": skip, "limit": limit})
         q = q.where(Team.event_id.in_(scoped))
     if event_id:
         q = q.where(Team.event_id == event_id)
     if team_status:
         q = q.where(Team.status == team_status)
+    count_q = select(func.count()).select_from(q.subquery())
+    total = (await db.execute(count_q)).scalar_one()
     q = q.offset(skip).limit(min(limit, 100))
     result = await db.execute(q)
     return _success(
-        [
-            {
-                "id": team.id,
-                "event_id": team.event_id,
-                "event_name": event_name,
-                "name": team.name,
-                "leader_profile_id": team.leader_profile_id,
-                "status": team.status,
-                "created_at": team.created_at,
-            }
-            for team, event_name in result.all()
-        ]
+        {
+            "items": [
+                {
+                    "id": team.id,
+                    "event_id": team.event_id,
+                    "event_name": event_name,
+                    "name": team.name,
+                    "leader_profile_id": team.leader_profile_id,
+                    "status": team.status,
+                    "created_at": team.created_at,
+                }
+                for team, event_name in result.all()
+            ],
+            "total": int(total),
+            "skip": skip,
+            "limit": limit,
+        }
     )
 
 
@@ -582,9 +605,9 @@ async def list_registrations(
     db: AsyncSession = Depends(get_db),
     admin: AdminUser = Depends(require_permission("registration-read")),
 ):
-    scoped = await scoped_event_ids(db, admin)
-    if event_id is not None:
-        await require_event_access(db, admin, event_id, "registration-read")
+    scoped = await resolve_scoped_event_ids_for_collection(
+        db, admin, event_id=event_id, permission="registration-read"
+    )
     q = (
         select(Registration)
         .options(*ops.ADMIN_REGISTRATION_LIST_LOAD)
@@ -592,7 +615,7 @@ async def list_registrations(
     )
     if scoped is not None:
         if not scoped:
-            return _success({"items": [], "skip": skip, "limit": limit})
+            return _success({"items": [], "total": 0, "skip": skip, "limit": limit})
         q = q.where(Registration.event_id.in_(scoped))
     if event_id:
         q = q.where(Registration.event_id == event_id)
@@ -620,11 +643,67 @@ async def get_registration_detail(
     return _success(detail)
 
 
+@router.get("/registrations/{registration_id}/recover-captured-payment/preview")
+async def preview_recover_captured_payment_admin(
+    registration_id: UUID,
+    payment_id: UUID = Query(...),
+    db: AsyncSession = Depends(get_db),
+    _: AdminUser = Depends(require_super_admin),
+):
+    preview = await preview_recover_captured_payment(
+        db, registration_id=registration_id, payment_id=payment_id
+    )
+    return _success(
+        {
+            "eligible": preview.eligible,
+            "reason": preview.reason,
+            "participant_name": preview.participant_name,
+            "registration_id": preview.registration_id,
+            "payment_id": preview.payment_id,
+            "razorpay_order_id": preview.razorpay_order_id,
+            "razorpay_payment_id": preview.razorpay_payment_id,
+            "amount_paise": preview.amount_paise,
+            "payment_status": preview.payment_status,
+            "registration_status": preview.registration_status,
+            "razorpay_capture_status": preview.razorpay_capture_status,
+        }
+    )
+
+
+@router.post("/registrations/{registration_id}/recover-captured-payment")
+async def recover_captured_payment_admin(
+    registration_id: UUID,
+    body: RecoverCapturedPaymentBody,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(require_super_admin),
+):
+    try:
+        result = await recover_captured_payment(
+            db,
+            admin,
+            registration_id=registration_id,
+            payment_id=body.payment_id,
+        )
+    except PaymentRecoveryError as err:
+        raise HTTPException(status_code=err.status_code, detail=err.message)
+    return _success(
+        RecoverCapturedPaymentResult(
+            message=result.message,
+            payment_status=result.payment_status,
+            registration_status=result.registration_status,
+            qr_active=result.qr_active,
+            receipt_generated=result.receipt_generated,
+            applied=result.applied,
+        ).model_dump()
+    )
+
+
 @router.patch("/registrations/{registration_id}")
 async def patch_registration(
     registration_id: UUID,
     body: AdminRegistrationUpdate,
     db: AsyncSession = Depends(get_db),
+    _: AdminUser = Depends(require_mutation_admin),
     admin: AdminUser = Depends(require_permission("registration-edit")),
 ):
     result = await db.execute(select(Registration).where(Registration.id == registration_id))
@@ -666,24 +745,37 @@ async def delete_registration_record(
 
 @router.get("/payments")
 async def list_payments(
+    event_id: Optional[UUID] = Query(default=None),
     payment_type: Optional[PaymentType] = Query(default=None),
     payment_status: Optional[PaymentStatus] = Query(default=None, alias="status"),
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_permission("payment-read")),
+    admin: AdminUser = Depends(require_permission("payment-read")),
 ):
+    scoped = await resolve_scoped_event_ids_for_collection(
+        db, admin, event_id=event_id, permission="payment-read"
+    )
     q = (
         select(Payment)
+        .join(Registration, Registration.payment_id == Payment.id)
         .where(
             Payment.payment_type.in_([PaymentType.SOLO_REGISTRATION, PaymentType.TEAM_REGISTRATION])
         )
         .order_by(Payment.created_at.desc())
     )
+    if scoped is not None:
+        if not scoped:
+            return _success({"items": [], "total": 0, "skip": skip, "limit": limit})
+        q = q.where(Registration.event_id.in_(scoped))
+    if event_id:
+        q = q.where(Registration.event_id == event_id)
     if payment_type:
         q = q.where(Payment.payment_type == payment_type)
     if payment_status:
         q = q.where(Payment.status == payment_status)
+    count_q = select(func.count()).select_from(q.subquery())
+    total = (await db.execute(count_q)).scalar_one()
     q = q.offset(skip).limit(min(limit, 100))
     result = await db.execute(q)
     payments = result.scalars().all()
@@ -703,6 +795,7 @@ async def list_payments(
                 }
                 for p in payments
             ],
+            "total": int(total),
             "skip": skip,
             "limit": limit,
         }

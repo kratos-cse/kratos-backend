@@ -33,9 +33,15 @@ async def _resolve_user_id_for_admin_grant(db: AsyncSession, admin_in: AdminUser
 @router.get("/me")
 async def get_current_admin_profile(
     current_admin: AdminUser = Depends(get_current_active_admin),
+    db: AsyncSession = Depends(get_db),
 ):
+    from app.services.event_access_service import get_assigned_event_ids, is_event_coordinator
+
     role = current_admin.role
     permissions = [p.permission_key for p in (role.permissions if role else [])]
+    assigned_event_ids: list[str] | None = None
+    if is_event_coordinator(current_admin):
+        assigned_event_ids = [str(eid) for eid in await get_assigned_event_ids(db, current_admin.id)]
     return {
         "status": "success",
         "data": {
@@ -44,6 +50,7 @@ async def get_current_admin_profile(
             "is_active": current_admin.is_active,
             "role": {"id": role.id, "name": role.name} if role else None,
             "permissions": permissions,
+            "assigned_event_ids": assigned_event_ids,
         },
     }
 

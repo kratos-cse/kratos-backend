@@ -83,7 +83,9 @@ async def test_duplicate_active_created_payment_is_idempotent(db):
 
     assert result["paymentId"] == str(existing.id)
     assert result["razorpayOrderId"] == existing.razorpay_order_id
-    count = await db.scalar(select(func.count()).select_from(Payment))
+    count = await db.scalar(
+        select(func.count()).select_from(Payment).where(Payment.payer_profile_id == profile.id)
+    )
     assert count == 1
 
 

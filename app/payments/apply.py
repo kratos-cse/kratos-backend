@@ -13,6 +13,7 @@ from app.models.payment import Payment
 from app.models.registration import Registration
 from app.models.team import Team, TeamMember
 from app.payments.handoffs import issue_receipt, trigger_qr
+from app.payments.reconciliation import log_payment_reconciliation, registration_linked_to_payment
 from app.services import notification_service
 
 logger = logging.getLogger("payments.apply")
@@ -41,6 +42,11 @@ def _as_row(payment: Payment) -> PaymentRow:
         payer_profile_id=payment.payer_profile_id,
         amount_paise=payment.amount_paise,
     )
+
+
+async def _load_payment_for_update(db: AsyncSession, payment_id: UUID) -> Optional[Payment]:
+    result = await db.execute(select(Payment).where(Payment.id == payment_id).with_for_update())
+    return result.scalar_one_or_none()
 
 
 async def transition_payment_status(
@@ -190,26 +196,82 @@ async def _run_handoffs(db: AsyncSession, payment: PaymentRow) -> None:
     await issue_receipt(db, payment.id)
 
 
-async def apply_payment_success(
-    db: AsyncSession, payment_id: UUID, razorpay_payment_id: str
-) -> ApplyResult:
-    payment = await transition_payment_status(
-        db,
-        payment_id,
-        [PaymentStatus.CREATED, PaymentStatus.FAILED],
-        status=PaymentStatus.PAID,
-        razorpay_payment_id=razorpay_payment_id,
-    )
-    if payment is None:
-        return ApplyResult(applied=False, payment=None)
+async def _confirm_registration_for_payment(db: AsyncSession, payment: Payment) -> None:
+    registration = await registration_linked_to_payment(db, payment.id)
+    log_payment_reconciliation("confirm_registration", payment=payment, registration=registration)
 
-    row = _as_row(payment)
+    if registration is None:
+        logger.warning(
+            "payment_success_without_registration_link payment_id=%s payment_status=%s",
+            payment.id,
+            payment.status.value,
+        )
+        return
+
+    if registration.status == RegistrationStatus.CANCELLED:
+        logger.warning(
+            "payment_success_registration_cancelled payment_id=%s registration_id=%s",
+            payment.id,
+            registration.id,
+        )
+        return
+
     if payment.payment_type == PaymentType.SOLO_REGISTRATION:
         await confirm_solo_registration(db, payment.id)
     elif payment.payment_type == PaymentType.TEAM_REGISTRATION:
         await confirm_team_registration(db, payment.id, payment.payer_profile_id)
 
-    await _run_handoffs(db, row)
+
+async def apply_payment_success(
+    db: AsyncSession, payment_id: UUID, razorpay_payment_id: str
+) -> ApplyResult:
+    payment = await _load_payment_for_update(db, payment_id)
+    if payment is None:
+        return ApplyResult(applied=False, payment=None)
+
+    registration = await registration_linked_to_payment(db, payment.id)
+    log_payment_reconciliation(
+        "apply_payment_success_start",
+        payment=payment,
+        registration=registration,
+        razorpay_payment_id=razorpay_payment_id,
+    )
+
+    newly_paid = False
+    if payment.status == PaymentStatus.PAID:
+        if payment.razorpay_payment_id is None and razorpay_payment_id:
+            payment.razorpay_payment_id = razorpay_payment_id
+            await db.flush()
+    elif payment.status in (PaymentStatus.CREATED, PaymentStatus.FAILED):
+        transitioned = await transition_payment_status(
+            db,
+            payment_id,
+            [PaymentStatus.CREATED, PaymentStatus.FAILED],
+            status=PaymentStatus.PAID,
+            razorpay_payment_id=razorpay_payment_id,
+        )
+        if transitioned is None:
+            payment = await _load_payment_for_update(db, payment_id)
+            if payment is None or payment.status != PaymentStatus.PAID:
+                return ApplyResult(applied=False, payment=None)
+        else:
+            payment = transitioned
+            newly_paid = True
+    else:
+        return ApplyResult(applied=False, payment=_as_row(payment))
+
+    row = _as_row(payment)
+    try:
+        await _confirm_registration_for_payment(db, payment)
+        await _run_handoffs(db, row)
+    except Exception:
+        logger.exception(
+            "payment_post_processing_failed payment_id=%s registration_id=%s",
+            payment.id,
+            registration.id if registration else None,
+        )
+        raise
+
     await db.commit()
 
     from app.services.admin_ops_service import invalidate_dashboard_cache
@@ -218,8 +280,9 @@ async def apply_payment_success(
     invalidate_spots_cache()
     invalidate_dashboard_cache()
 
-    await notification_service.notify_payment_confirmed(db, row.id)  # per-participant QR confirmation emails
-    return ApplyResult(applied=True, payment=row)
+    if newly_paid:
+        await notification_service.notify_payment_confirmed(db, row.id)
+    return ApplyResult(applied=newly_paid, payment=row)
 
 
 async def apply_payment_failure(db: AsyncSession, payment_id: UUID) -> ApplyResult:

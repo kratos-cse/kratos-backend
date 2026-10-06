@@ -98,13 +98,6 @@ async def get_registration(
 ):
     registration = await get_registration_or_404(db, registration_id)
     await assert_can_view_registration(db, registration, profile, current_user.is_admin_flagged)
-
-    if registration.payment and registration.payment.status == PaymentStatus.CREATED:
-        from app.api.v1.endpoints.payments import _sync_payment_if_needed
-
-        await _sync_payment_if_needed(db, registration.payment)
-        registration = await get_registration_or_404(db, registration_id)
-
     return registration
 
 

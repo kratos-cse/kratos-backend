@@ -171,23 +171,38 @@ async def dashboard_payload(
     team_result = await db.execute(team_q)
     teams = {row[0].value if hasattr(row[0], "value") else str(row[0]): int(row[1]) for row in team_result.all()}
 
-    pay_q = select(Payment.status, func.count()).select_from(Payment).group_by(Payment.status)
+    pay_q = (
+        select(Payment.status, func.count())
+        .select_from(Payment)
+        .join(Registration, Registration.payment_id == Payment.id)
+        .group_by(Payment.status)
+    )
+    if scoped_event_ids is not None:
+        pay_q = pay_q.where(Registration.event_id.in_(scoped_event_ids))
     pay_result = await db.execute(pay_q)
     payments = {row[0].value if hasattr(row[0], "value") else str(row[0]): int(row[1]) for row in pay_result.all()}
 
-    revenue_q = select(func.coalesce(func.sum(Payment.amount_paise), 0)).where(Payment.status == PaymentStatus.PAID)
+    revenue_q = (
+        select(func.coalesce(func.sum(Payment.amount_paise), 0))
+        .select_from(Payment)
+        .join(Registration, Registration.payment_id == Payment.id)
+        .where(Payment.status == PaymentStatus.PAID)
+    )
+    if scoped_event_ids is not None:
+        revenue_q = revenue_q.where(Registration.event_id.in_(scoped_event_ids))
     paid_revenue_paise = int((await db.execute(revenue_q)).scalar_one())
 
     try:
-        attendance_scans = (
-            await db.execute(select(func.count()).select_from(AttendanceScan))
-        ).scalar_one()
+        attendance_q = select(func.count()).select_from(AttendanceScan)
+        if scoped_event_ids is not None:
+            attendance_q = attendance_q.where(AttendanceScan.event_id.in_(scoped_event_ids))
+        attendance_scans = (await db.execute(attendance_q)).scalar_one()
     except Exception:
         attendance_scans = 0
 
     event_operations = await build_event_operations_rows(db, scoped_event_ids=scoped_event_ids)
     recent_registrations = await recent_registration_activity(db, scoped_event_ids=scoped_event_ids, limit=8)
-    recent_payments = await recent_payment_activity(db, limit=8)
+    recent_payments = await recent_payment_activity(db, scoped_event_ids=scoped_event_ids, limit=8)
 
     payload = {
         "events_total": events_total,
@@ -1004,18 +1019,28 @@ async def search_participant_profiles(
     *,
     q: Optional[str],
     event_id: Optional[uuid.UUID],
+    scoped_event_ids: Optional[set[uuid.UUID]] = None,
     skip: int,
     limit: int,
 ) -> tuple[list[Profile], int]:
     base = select(Profile).distinct()
-    if event_id:
+    if scoped_event_ids is not None and not scoped_event_ids:
+        return [], 0
+
+    effective_event_ids: Optional[set[uuid.UUID]] = None
+    if event_id is not None:
+        effective_event_ids = {event_id}
+    elif scoped_event_ids is not None:
+        effective_event_ids = scoped_event_ids
+
+    if effective_event_ids:
         solo_ids = select(Registration.profile_id).where(
-            Registration.event_id == event_id,
+            Registration.event_id.in_(effective_event_ids),
             Registration.profile_id.isnot(None),
             Registration.status != RegistrationStatus.CANCELLED,
         )
         team_profile_ids = select(TeamMember.profile_id).where(
-            TeamMember.event_id == event_id,
+            TeamMember.event_id.in_(effective_event_ids),
             TeamMember.status.notin_([TeamMemberStatus.LEFT, TeamMemberStatus.REMOVED]),
         )
         base = base.where(or_(Profile.id.in_(solo_ids), Profile.id.in_(team_profile_ids)))
@@ -1437,14 +1462,23 @@ async def recent_registration_activity(
     return items
 
 
-async def recent_payment_activity(db: AsyncSession, limit: int = 8) -> list[dict[str, Any]]:
+async def recent_payment_activity(
+    db: AsyncSession,
+    *,
+    scoped_event_ids: Optional[set[uuid.UUID]] = None,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    if scoped_event_ids is not None and not scoped_event_ids:
+        return []
     q = (
         select(Payment, Registration, Event.name)
-        .outerjoin(Registration, Registration.payment_id == Payment.id)
-        .outerjoin(Event, Event.id == Registration.event_id)
+        .join(Registration, Registration.payment_id == Payment.id)
+        .join(Event, Event.id == Registration.event_id)
         .order_by(Payment.created_at.desc())
         .limit(limit)
     )
+    if scoped_event_ids is not None:
+        q = q.where(Registration.event_id.in_(scoped_event_ids))
     result = await db.execute(q)
     items = []
     for payment, _reg, event_name in result.all():

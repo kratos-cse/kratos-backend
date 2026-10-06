@@ -102,6 +102,40 @@ async def scoped_event_ids(db: AsyncSession, admin: AdminUser) -> Optional[set[u
     return await get_assigned_event_ids(db, admin.id)
 
 
+def assert_coordinator_read_only(admin: AdminUser) -> None:
+    """Event coordinators may never perform admin mutations."""
+    if is_event_coordinator(admin):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Event coordinators have read-only access.",
+        )
+
+
+async def resolve_scoped_event_ids_for_collection(
+    db: AsyncSession,
+    admin: AdminUser,
+    *,
+    event_id: Optional[uuid.UUID] = None,
+    permission: str,
+) -> Optional[set[uuid.UUID]]:
+    """
+    Resolve event scope for list endpoints.
+
+    Returns None when unrestricted (super admin / global admin).
+    Returns a (possibly empty) set for event coordinators.
+    Raises 403 when an explicit event_id filter is outside scope.
+    """
+    scoped = await scoped_event_ids(db, admin)
+    if event_id is not None:
+        await require_event_access(db, admin, event_id, permission, write=False)
+        if scoped is not None and event_id not in scoped:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not assigned to this event.",
+            )
+    return scoped
+
+
 async def assert_event_in_scope(
     db: AsyncSession,
     admin: AdminUser,

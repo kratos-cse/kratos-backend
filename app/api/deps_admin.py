@@ -9,7 +9,8 @@ from sqlalchemy.orm import selectinload
 
 from app.core.security import get_current_user
 from app.db.session import get_db
-from app.core.permissions import admin_has_expanded_permission
+from app.core.permissions import EVENT_COORDINATOR_PERMISSIONS, admin_has_expanded_permission
+from app.services.event_access_service import is_event_coordinator
 from app.models.admin import SUPER_ADMIN_ROLE_NAME, AdminUser, Role
 from app.models.user import User
 
@@ -90,6 +91,13 @@ def require_permission(*permission_keys: str):
     async def _dependency(
         current_admin: AdminUser = Depends(get_current_active_admin),
     ) -> AdminUser:
+        if is_event_coordinator(current_admin):
+            for key in permission_keys:
+                if key not in EVENT_COORDINATOR_PERMISSIONS:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="You do not have permission to perform this action.",
+                    )
         if admin_has_permission(current_admin, *permission_keys):
             return current_admin
         raise HTTPException(
@@ -98,6 +106,16 @@ def require_permission(*permission_keys: str):
         )
 
     return _dependency
+
+
+async def require_mutation_admin(
+    current_admin: AdminUser = Depends(get_current_active_admin),
+) -> AdminUser:
+    """Deny event coordinators on any write/admin mutation endpoint."""
+    from app.services.event_access_service import assert_coordinator_read_only
+
+    assert_coordinator_read_only(current_admin)
+    return current_admin
 
 
 def require_scoped_event_access(permission: str, *, write: bool = False):

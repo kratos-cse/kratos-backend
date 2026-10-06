@@ -180,6 +180,19 @@ class AdminRegistrationListItem(BaseModel):
     created_at: datetime
 
 
+class RecoverCapturedPaymentBody(BaseModel):
+    payment_id: uuid.UUID
+
+
+class RecoverCapturedPaymentResult(BaseModel):
+    message: str
+    payment_status: PaymentStatus
+    registration_status: RegistrationStatus
+    qr_active: bool
+    receipt_generated: bool
+    applied: bool
+
+
 class PaymentListItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
