@@ -21,6 +21,8 @@ class AdminUserCreate(BaseModel):
     user_id: Optional[UUID] = None
     email: Optional[EmailStr] = None
     role_id: UUID
+    # Used when role is EVENT COORDINATOR — creates EventAdminAssignment rows.
+    event_ids: Optional[List[UUID]] = None
 
     @model_validator(mode="after")
     def user_id_xor_email(self) -> "AdminUserCreate":
@@ -34,3 +36,6 @@ class AdminUserCreate(BaseModel):
 class AdminUserUpdate(BaseModel):
     role_id: Optional[UUID] = None
     is_active: Optional[bool] = None
+    # When set, reconciles EventAdminAssignment to exactly these events
+    # (only valid for EVENT COORDINATOR; cleared automatically on role leave).
+    event_ids: Optional[List[UUID]] = None

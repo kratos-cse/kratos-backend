@@ -12,9 +12,8 @@ from app.db.session import get_db
 from app.models.admin import AdminUser
 from app.models.payment import Payment
 from app.models.profile import Profile
-from app.models.registration import Registration
 from app.models.user import User
-from app.services.registration_service import assert_can_view_registration
+from app.services.registration_service import assert_can_view_registration, get_registration_by_payment_id
 
 
 async def _profile_from_bearer(db: AsyncSession, credentials: HTTPAuthorizationCredentials) -> Profile:
@@ -56,8 +55,7 @@ async def assert_can_access_receipt(db: AsyncSession, payment: Payment, profile:
     if admin_result.scalar_one_or_none() is not None:
         return
 
-    reg_result = await db.execute(select(Registration).where(Registration.payment_id == payment.id))
-    registration = reg_result.scalar_one_or_none()
+    registration = await get_registration_by_payment_id(db, payment.id)
     if registration is not None:
         await assert_can_view_registration(db, registration, profile, is_admin=False)
         return

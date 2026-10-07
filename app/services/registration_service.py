@@ -46,6 +46,18 @@ _REGISTRATION_LOAD_OPTS = (
     selectinload(Registration.payment),
 )
 
+_REGISTRATION_AUTH_LOAD_OPTS = (selectinload(Registration.team),)
+
+
+async def get_registration_by_payment_id(db: AsyncSession, payment_id: uuid.UUID) -> Optional[Registration]:
+    """Registration linked to a payment, with team loaded for authorization checks."""
+    result = await db.execute(
+        select(Registration)
+        .options(*_REGISTRATION_AUTH_LOAD_OPTS)
+        .where(Registration.payment_id == payment_id)
+    )
+    return result.scalar_one_or_none()
+
 
 async def _get_event_with_rules(
     db: AsyncSession, event_id: uuid.UUID, *, for_update: bool = False

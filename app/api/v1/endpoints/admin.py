@@ -8,8 +8,9 @@ from sqlalchemy.orm import selectinload
 
 from app.api.deps_admin import get_current_active_admin, invalidate_admin_cache, require_super_admin
 from app.services import admin_delete_service
+from app.services import event_assignment_service as assignment_svc
 from app.db.session import get_db
-from app.models.admin import AdminUser, Permission, Role
+from app.models.admin import EVENT_COORDINATOR_ROLE_NAME, AdminUser, Permission, Role
 from app.models.user import User
 from app.schemas.admin import AdminUserCreate, AdminUserUpdate, RoleCreate, RoleUpdate
 
@@ -166,6 +167,8 @@ async def list_admin_users(
         .limit(min(limit, 100))
     )
     rows = result.all()
+    admin_ids = [admin.id for admin, _ in rows]
+    assigned_map = await assignment_svc.get_assigned_event_summaries(db, admin_ids)
     data = [
         {
             "admin_user_id": admin.id,
@@ -173,6 +176,7 @@ async def list_admin_users(
             "email": email,
             "role": {"id": admin.role.id, "name": admin.role.name} if admin.role else None,
             "is_active": admin.is_active,
+            "assigned_events": assigned_map.get(admin.id, []),
         }
         for admin, email in rows
     ]
@@ -183,18 +187,34 @@ async def list_admin_users(
 async def grant_admin_access(
     admin_in: AdminUserCreate,
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_super_admin),
+    actor: AdminUser = Depends(require_super_admin),
 ):
     user_id = await _resolve_user_id_for_admin_grant(db, admin_in)
     user = await db.execute(select(User).where(User.id == user_id))
     if not user.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="User not found.")
-    role = await db.execute(select(Role).where(Role.id == admin_in.role_id))
-    if not role.scalar_one_or_none():
+    role_result = await db.execute(select(Role).where(Role.id == admin_in.role_id))
+    role = role_result.scalar_one_or_none()
+    if not role:
         raise HTTPException(status_code=404, detail="Role not found.")
 
     new_admin = AdminUser(user_id=user_id, role_id=admin_in.role_id, is_active=True)
     db.add(new_admin)
+    try:
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail="User is already an admin.")
+
+    assigned_events = await assignment_svc.reconcile_coordinator_assignments(
+        db,
+        new_admin.id,
+        admin_in.event_ids,
+        actor.id,
+        role_name=role.name,
+        apply_event_ids=True,
+    )
+
     try:
         await db.commit()
         await db.refresh(new_admin)
@@ -205,7 +225,12 @@ async def grant_admin_access(
     invalidate_admin_cache(user_id)
     return {
         "status": "success",
-        "data": {"admin_user_id": new_admin.id, "is_active": new_admin.is_active},
+        "data": {
+            "admin_user_id": new_admin.id,
+            "is_active": new_admin.is_active,
+            "role": {"id": role.id, "name": role.name},
+            "assigned_events": assigned_events,
+        },
     }
 
 
@@ -214,27 +239,81 @@ async def update_admin_user(
     admin_user_id: UUID,
     admin_in: AdminUserUpdate,
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_super_admin),
+    actor: AdminUser = Depends(require_super_admin),
 ):
-    result = await db.execute(select(AdminUser).where(AdminUser.id == admin_user_id))
+    result = await db.execute(
+        select(AdminUser).options(selectinload(AdminUser.role)).where(AdminUser.id == admin_user_id)
+    )
     admin = result.scalar_one_or_none()
     if not admin:
         raise HTTPException(status_code=404, detail="Admin user not found.")
 
+    previous_role_name = admin.role.name if admin.role else None
+    role = admin.role
+
     if admin_in.role_id is not None:
-        role = await db.execute(select(Role).where(Role.id == admin_in.role_id))
-        if not role.scalar_one_or_none():
+        role_result = await db.execute(select(Role).where(Role.id == admin_in.role_id))
+        role = role_result.scalar_one_or_none()
+        if not role:
             raise HTTPException(status_code=404, detail="Target role not found.")
         admin.role_id = admin_in.role_id
 
     if admin_in.is_active is not None:
         admin.is_active = admin_in.is_active
 
+    await db.flush()
+
+    # Refresh role relationship after role_id change so reconcile sees the new name.
+    if admin_in.role_id is not None:
+        role_result = await db.execute(select(Role).where(Role.id == admin.role_id))
+        role = role_result.scalar_one()
+        admin.role = role
+
+    role_name = role.name if role else ""
+    is_coordinator = role_name == EVENT_COORDINATOR_ROLE_NAME
+    left_coordinator = (
+        previous_role_name == EVENT_COORDINATOR_ROLE_NAME and not is_coordinator
+    )
+
+    if not is_coordinator and admin_in.event_ids:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="event_ids may only be set for EVENT COORDINATOR admins.",
+        )
+
+    if left_coordinator:
+        # Stale coordinator scope must not linger after promotion/demotion.
+        assigned_events = await assignment_svc.reconcile_coordinator_assignments(
+            db,
+            admin.id,
+            None,
+            actor.id,
+            role_name=role_name,
+            apply_event_ids=True,
+        )
+    elif is_coordinator and admin_in.event_ids is not None:
+        assigned_events = await assignment_svc.reconcile_coordinator_assignments(
+            db,
+            admin.id,
+            admin_in.event_ids,
+            actor.id,
+            role_name=role_name,
+            apply_event_ids=True,
+        )
+    else:
+        summaries = await assignment_svc.get_assigned_event_summaries(db, [admin.id])
+        assigned_events = summaries.get(admin.id, [])
+
     await db.commit()
     invalidate_admin_cache(admin.user_id)
     return {
         "status": "success",
-        "data": {"admin_user_id": admin.id, "is_active": admin.is_active},
+        "data": {
+            "admin_user_id": admin.id,
+            "is_active": admin.is_active,
+            "role": {"id": role.id, "name": role.name} if role else None,
+            "assigned_events": assigned_events,
+        },
     }
 
 
