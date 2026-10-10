@@ -864,7 +864,7 @@ async def export_payments(
 
 @router.get("/exports/team-rosters")
 async def export_team_rosters(
-    event_id: UUID = Query(..., description="Export teams for this event only"),
+    event_id: UUID = Query(..., description="Export confirmed (paid) teams for this event only"),
     format: str = Query(default="xlsx", pattern="^(xlsx|csv)$"),
     include_inactive: bool = Query(
         default=False,

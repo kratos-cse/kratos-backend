@@ -1058,6 +1058,7 @@ async def build_team_roster_export_rows(
     *,
     include_inactive: bool = False,
 ) -> tuple[str, list[list[Any]]]:
+    """One row per active roster member for teams with CONFIRMED registration and PAID payment."""
     event = (await db.execute(select(Event).where(Event.id == event_id))).scalar_one_or_none()
     if event is None:
         raise HTTPException(status_code=404, detail="Event not found.")
@@ -1066,12 +1067,20 @@ async def build_team_roster_export_rows(
         (
             await db.execute(
                 select(Team)
-                .where(Team.event_id == event_id)
+                .join(Registration, Registration.team_id == Team.id)
+                .join(Payment, Registration.payment_id == Payment.id)
+                .where(
+                    Team.event_id == event_id,
+                    Team.status != TeamStatus.CANCELLED,
+                    Registration.status == RegistrationStatus.CONFIRMED,
+                    Payment.status == PaymentStatus.PAID,
+                )
                 .order_by(Team.name.asc())
                 .options(selectinload(Team.members))
             )
         )
         .scalars()
+        .unique()
         .all()
     )
 
