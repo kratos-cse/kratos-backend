@@ -472,6 +472,27 @@ def _format_worksheet(ws, headers: list[str], rows: list[list[Any]]):
         ws.auto_filter.ref = ws.dimensions
 
 
+# openpyxl forbids: \ / ? * [ ] : in worksheet titles (max 31 chars).
+_INVALID_EXCEL_SHEET_TITLE_CHARS = frozenset(r":\/?*[]")
+
+
+def _excel_sheet_title(raw: str, *, fallback: str = "Sheet") -> str:
+    cleaned = "".join(c for c in (raw or "").strip() if c not in _INVALID_EXCEL_SHEET_TITLE_CHARS)
+    cleaned = cleaned.strip() or fallback
+    return cleaned[:31]
+
+
+def _unique_excel_sheet_title(wb: Workbook, raw: str, *, fallback: str = "Sheet") -> str:
+    safe_title = _excel_sheet_title(raw, fallback=fallback)
+    base_title = safe_title
+    counter = 1
+    while safe_title in wb.sheetnames:
+        suffix = f" {counter}"
+        safe_title = base_title[: 31 - len(suffix)] + suffix
+        counter += 1
+    return safe_title
+
+
 def _multi_sheet_workbook_bytes(
     headers: Optional[list[str]] = None,
     sheets_data: Optional[dict[str, Any]] = None,
@@ -489,17 +510,7 @@ def _multi_sheet_workbook_bytes(
         else:
             sheet_headers, sheet_rows = headers or [], val
 
-        # Sheet titles max 31 chars and no invalid chars
-        safe_title = "".join(c for c in title if c not in r"\/?*[]")[:31]
-        if not safe_title:
-            safe_title = "Sheet"
-        # Ensure unique title
-        base_title = safe_title
-        counter = 1
-        while safe_title in wb.sheetnames:
-            suffix = f" {counter}"
-            safe_title = base_title[: 31 - len(suffix)] + suffix
-            counter += 1
+        safe_title = _unique_excel_sheet_title(wb, title, fallback="Registrations")
 
         ws = wb.create_sheet(title=safe_title)
         _format_worksheet(ws, sheet_headers, sheet_rows)
@@ -522,7 +533,7 @@ def _workbook_bytes(
 ) -> BytesIO:
     wb = Workbook()
     ws = wb.active
-    ws.title = sheet_title[:31]
+    ws.title = _excel_sheet_title(sheet_title, fallback="Sheet1")
     _format_worksheet(ws, headers, rows)
     buf = BytesIO()
     wb.save(buf)

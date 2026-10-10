@@ -28,6 +28,10 @@ from app.services import admin_ops_service as ops
 from tests.conftest import _make_event, _make_user_profile, requires_db
 
 
+def test_excel_sheet_title_strips_colon():
+    assert ops._excel_sheet_title("Hackathon: Finals") == "Hackathon Finals"
+
+
 @requires_db
 @pytest.mark.asyncio
 async def test_single_event_export_predetermined_team_size(db):
@@ -136,13 +140,16 @@ async def test_multi_sheet_workbook_custom_columns_per_event(db):
 
     await db.commit()
 
+    ev_duo.name = f"Duo: Cup {uuid.uuid4().hex[:4]}"
+    await db.flush()
+
     buf = await ops.export_registrations_xlsx(db)
     wb = load_workbook(io.BytesIO(buf.getvalue()))
 
     # Find sheets
     sheet_names = wb.sheetnames
-    safe_duo = ev_duo.name[:31]
-    safe_solo = ev_solo.name[:31]
+    safe_duo = ops._excel_sheet_title(ev_duo.name)
+    safe_solo = ops._excel_sheet_title(ev_solo.name)
 
     assert safe_duo in sheet_names
     assert safe_solo in sheet_names
