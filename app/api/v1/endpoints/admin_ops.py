@@ -1,5 +1,6 @@
 """Phase 5 admin operations — dashboard, events, participants, teams, exports."""
 from typing import Optional
+from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -44,6 +45,7 @@ from app.schemas.admin_ops import (
     RecoverCapturedPaymentResult,
     TransferLeadershipBody,
 )
+from app.schemas.team import RosterAddRequest
 from app.payments.admin_recover import PaymentRecoveryError, preview_recover_captured_payment, recover_captured_payment
 from app.schemas.event_assignment import EventAssignmentCreate
 from app.services import admin_delete_service, admin_ops_service as ops
@@ -534,6 +536,23 @@ async def get_team_detail(
     return _success(detail)
 
 
+@router.post("/teams/{team_id}/roster")
+async def admin_add_team_roster_member(
+    team_id: UUID,
+    body: RosterAddRequest,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(require_permission("team-edit")),
+):
+    """Add a mandatory member or substitute to an incomplete team roster."""
+    team_result = await db.execute(select(Team).where(Team.id == team_id))
+    team = team_result.scalar_one_or_none()
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found.")
+    await require_event_access(db, admin, team.event_id, "team-edit", write=True)
+    detail = await ops.admin_add_team_roster_member(db, team_id, body)
+    return _success(detail)
+
+
 @router.patch("/teams/{team_id}")
 async def patch_team(
     team_id: UUID,
@@ -840,6 +859,47 @@ async def export_payments(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=payments.xlsx"},
+    )
+
+
+@router.get("/exports/team-rosters")
+async def export_team_rosters(
+    event_id: UUID = Query(..., description="Export teams for this event only"),
+    format: str = Query(default="xlsx", pattern="^(xlsx|csv)$"),
+    include_inactive: bool = Query(
+        default=False,
+        description="Include members with status LEFT or REMOVED",
+    ),
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(require_permission("team-read")),
+):
+    await require_event_access(db, admin, event_id, "team-read")
+    if format == "csv":
+        event_name, buf = await ops.export_team_rosters_csv(
+            db, event_id, include_inactive=include_inactive
+        )
+        filename = ops.team_roster_export_filename(event_name, "csv")
+        return StreamingResponse(
+            buf,
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{filename}"; filename*=UTF-8\'\'{quote(filename)}'
+                )
+            },
+        )
+    event_name, buf = await ops.export_team_rosters_xlsx(
+        db, event_id, include_inactive=include_inactive
+    )
+    filename = ops.team_roster_export_filename(event_name, "xlsx")
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{filename}"; filename*=UTF-8\'\'{quote(filename)}'
+            )
+        },
     )
 
 

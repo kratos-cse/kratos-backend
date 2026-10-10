@@ -80,6 +80,7 @@ class TeamMember(Base):
     phone: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     contact_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     college_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    department: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     year_of_study: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

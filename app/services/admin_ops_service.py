@@ -1,9 +1,10 @@
 """Admin operations — dashboard aggregates, team admin actions, Excel exports."""
 import csv
 import json
+import re
 import uuid
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from io import BytesIO, StringIO
 from typing import Any, Optional
 
@@ -25,6 +26,7 @@ from app.models.enums import (
     RegistrationFieldSource,
     RegistrationMode,
     RegistrationStatus,
+    TeamMemberEntrySource,
     TeamMemberRole,
     TeamMemberStatus,
     TeamStatus,
@@ -46,12 +48,15 @@ from app.services.event_slot import derive_event_slot
 from app.services.roster_service import (
     ROSTER_STYLE_MEMBERS_SUBSTITUTES,
     apply_roster_to_rules,
+    can_add_role,
     count_mandatory,
     count_substitutes,
     get_roster_style,
     roster_limits,
     sync_legacy_team_sizes,
 )
+from app.schemas.team import RosterAddRequest
+from app.services import team_service
 
 _ACTIVE_MEMBER_STATUSES = (TeamMemberStatus.ACTIVE, TeamMemberStatus.PENDING_PAYMENT)
 
@@ -970,6 +975,211 @@ async def export_payments_xlsx(db: AsyncSession) -> BytesIO:
     )
 
 
+_TEAM_ROSTER_EXPORT_HEADERS = [
+    "Event Name",
+    "Team Name",
+    "Team Status",
+    "Member Name",
+    "Role",
+    "Member Status",
+    "Phone",
+    "Email",
+    "College",
+    "Department",
+    "Year of Study",
+    "Entry Source",
+]
+
+_ROLE_EXPORT_LABELS = {
+    TeamMemberRole.LEADER: "Leader",
+    TeamMemberRole.MEMBER: "Member",
+    TeamMemberRole.SUBSTITUTE: "Substitute",
+}
+
+_ENTRY_SOURCE_EXPORT_LABELS = {
+    TeamMemberEntrySource.LEADER_ENTERED: "Leader entered",
+    TeamMemberEntrySource.LINKED_ACCOUNT: "Linked account",
+}
+
+_TERMINAL_MEMBER_STATUSES = frozenset({TeamMemberStatus.LEFT, TeamMemberStatus.REMOVED})
+
+
+def team_roster_export_filename(event_name: str, file_format: str) -> str:
+    base = re.sub(r"[^\w\s-]", "", (event_name or "event").strip(), flags=re.UNICODE)
+    base = re.sub(r"[\s_]+", "-", base).strip("-").lower() or "event"
+    ext = "csv" if file_format == "csv" else "xlsx"
+    return f"{base}-team-rosters.{ext}"
+
+
+def _team_roster_member_sort_key(member: TeamMember) -> tuple:
+    role_order = {
+        TeamMemberRole.LEADER: 0,
+        TeamMemberRole.MEMBER: 1,
+        TeamMemberRole.SUBSTITUTE: 2,
+    }
+    joined = member.joined_at or datetime.min.replace(tzinfo=timezone.utc)
+    return (role_order.get(member.role, 1), joined)
+
+
+def _team_member_export_identity(member: TeamMember, profile: Profile | None) -> dict[str, Any]:
+    if profile is not None:
+        return {
+            "full_name": profile.full_name,
+            "phone": profile.phone,
+            "contact_email": profile.contact_email,
+            "college_name": profile.college_name,
+            "department": profile.department,
+            "year_of_study": profile.year_of_study,
+        }
+    return {
+        "full_name": member.full_name,
+        "phone": member.phone,
+        "contact_email": member.contact_email,
+        "college_name": member.college_name,
+        "department": getattr(member, "department", None),
+        "year_of_study": member.year_of_study,
+    }
+
+
+async def build_team_roster_export_rows(
+    db: AsyncSession,
+    event_id: uuid.UUID,
+    *,
+    include_inactive: bool = False,
+) -> tuple[str, list[list[Any]]]:
+    event = (await db.execute(select(Event).where(Event.id == event_id))).scalar_one_or_none()
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found.")
+
+    teams = (
+        (
+            await db.execute(
+                select(Team)
+                .where(Team.event_id == event_id)
+                .order_by(Team.name.asc())
+                .options(selectinload(Team.members))
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    profile_ids: set[uuid.UUID] = {m.profile_id for t in teams for m in (t.members or []) if m.profile_id}
+    profiles: dict[uuid.UUID, Profile] = {}
+    if profile_ids:
+        prof_result = await db.execute(select(Profile).where(Profile.id.in_(profile_ids)))
+        profiles = {p.id: p for p in prof_result.scalars().all()}
+
+    rows: list[list[Any]] = []
+    for team in teams:
+        members = sorted(team.members or [], key=_team_roster_member_sort_key)
+        team_status = team.status.value if hasattr(team.status, "value") else str(team.status)
+        for member in members:
+            if not include_inactive and member.status in _TERMINAL_MEMBER_STATUSES:
+                continue
+            ident = _team_member_export_identity(
+                member, profiles.get(member.profile_id) if member.profile_id else None
+            )
+            role_label = _ROLE_EXPORT_LABELS.get(
+                member.role,
+                member.role.value if hasattr(member.role, "value") else str(member.role),
+            )
+            status_label = (
+                member.status.value if hasattr(member.status, "value") else str(member.status)
+            )
+            entry_label = _ENTRY_SOURCE_EXPORT_LABELS.get(
+                member.entry_source,
+                member.entry_source.value
+                if hasattr(member.entry_source, "value")
+                else str(member.entry_source),
+            )
+            rows.append(
+                [
+                    event.name,
+                    team.name,
+                    team_status,
+                    ident.get("full_name") or "",
+                    role_label,
+                    status_label,
+                    ident.get("phone") or "",
+                    ident.get("contact_email") or "",
+                    ident.get("college_name") or "",
+                    ident.get("department") or "",
+                    ident.get("year_of_study") or "",
+                    entry_label,
+                ]
+            )
+    return event.name, rows
+
+
+def _team_rosters_workbook_bytes(event_name: str, rows: list[list[Any]]) -> BytesIO:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Team rosters"
+    title_cell = ws.cell(row=1, column=1, value=f"Event: {event_name}")
+    title_cell.font = Font(bold=True, size=14)
+    ws.merge_cells(
+        start_row=1,
+        start_column=1,
+        end_row=1,
+        end_column=len(_TEAM_ROSTER_EXPORT_HEADERS),
+    )
+    header_row = 2
+    for col_idx, header in enumerate(_TEAM_ROSTER_EXPORT_HEADERS, start=1):
+        cell = ws.cell(row=header_row, column=col_idx, value=header)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1F2937")
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    data_font = Font(size=11)
+    data_alignment = Alignment(vertical="top", wrap_text=True)
+    for r_idx, row in enumerate(rows, start=header_row + 1):
+        for col_idx, value in enumerate(row, start=1):
+            cell = ws.cell(row=r_idx, column=col_idx, value=value if value is not None else "")
+            cell.font = data_font
+            cell.alignment = data_alignment
+    for col in ws.columns:
+        max_len = 0
+        col_letter = get_column_letter(col[0].column)
+        for cell in col:
+            if cell.row < header_row:
+                continue
+            val_str = str(cell.value or "")
+            if len(val_str) > max_len:
+                max_len = len(val_str)
+        ws.column_dimensions[col_letter].width = min(max(max_len + 4, 12), 60)
+    ws.freeze_panes = "A3"
+    if rows:
+        ws.auto_filter.ref = f"A{header_row}:{get_column_letter(len(_TEAM_ROSTER_EXPORT_HEADERS))}{header_row + len(rows)}"
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+async def export_team_rosters_xlsx(
+    db: AsyncSession,
+    event_id: uuid.UUID,
+    *,
+    include_inactive: bool = False,
+) -> tuple[str, BytesIO]:
+    event_name, rows = await build_team_roster_export_rows(
+        db, event_id, include_inactive=include_inactive
+    )
+    return event_name, _team_rosters_workbook_bytes(event_name, rows)
+
+
+async def export_team_rosters_csv(
+    db: AsyncSession,
+    event_id: uuid.UUID,
+    *,
+    include_inactive: bool = False,
+) -> tuple[str, BytesIO]:
+    event_name, rows = await build_team_roster_export_rows(
+        db, event_id, include_inactive=include_inactive
+    )
+    return event_name, _csv_bytes(_TEAM_ROSTER_EXPORT_HEADERS, rows)
+
+
 async def export_attendance_xlsx(
     db: AsyncSession,
     event_id: Optional[uuid.UUID] = None,
@@ -1275,9 +1485,30 @@ async def get_admin_registration_detail(db: AsyncSession, registration_id: uuid.
     return payload
 
 
+async def admin_add_team_roster_member(
+    db: AsyncSession,
+    team_id: uuid.UUID,
+    payload: RosterAddRequest,
+) -> dict[str, Any]:
+    """Add roster member as admin (team-edit + event scope enforced by caller)."""
+    team_result = await db.execute(select(Team).where(Team.id == team_id))
+    team = team_result.scalar_one_or_none()
+    if team is None:
+        raise HTTPException(status_code=404, detail="Team not found.")
+    leader_result = await db.execute(select(Profile).where(Profile.id == team.leader_profile_id))
+    leader = leader_result.scalar_one_or_none()
+    if leader is None:
+        raise HTTPException(status_code=400, detail="Team leader profile is missing.")
+    await team_service.add_roster_member(db, team_id, leader, payload, as_admin=True)
+    return await get_admin_team_detail(db, team_id)
+
+
 async def get_admin_team_detail(db: AsyncSession, team_id: uuid.UUID) -> dict[str, Any]:
     result = await db.execute(
-        select(Team).options(selectinload(Team.members)).where(Team.id == team_id)
+        select(Team)
+        .execution_options(populate_existing=True)
+        .options(selectinload(Team.members))
+        .where(Team.id == team_id)
     )
     team = result.scalar_one_or_none()
     if team is None:
@@ -1321,6 +1552,9 @@ async def get_admin_team_detail(db: AsyncSession, team_id: uuid.UUID) -> dict[st
                 "phone": prof.phone if prof else m.phone,
                 "contact_email": prof.contact_email if prof else m.contact_email,
                 "college_name": prof.college_name if prof else m.college_name,
+                "department": (
+                    prof.department if prof else getattr(m, "department", None)
+                ),
                 "year_of_study": prof.year_of_study if prof else m.year_of_study,
                 "role": m.role,
                 "status": m.status,
@@ -1330,6 +1564,15 @@ async def get_admin_team_detail(db: AsyncSession, team_id: uuid.UUID) -> dict[st
             }
         )
     leader = profiles.get(team.leader_profile_id) if team.leader_profile_id else None
+    active_roster = [
+        m
+        for m in (team.members or [])
+        if m.status not in (TeamMemberStatus.LEFT, TeamMemberStatus.REMOVED)
+    ]
+    required = summary["required_member_count"]
+    max_subs = summary["substitute_count"]
+    mandatory_filled = summary["mandatory_filled"]
+    subs_filled = summary["substitutes_filled"]
     return {
         "id": team.id,
         "event_id": team.event_id,
@@ -1340,11 +1583,23 @@ async def get_admin_team_detail(db: AsyncSession, team_id: uuid.UUID) -> dict[st
         "leader": _profile_contact_dict(leader),
         "created_at": team.created_at,
         "active_member_count": summary["active_member_count"],
-        "required_member_count": summary["required_member_count"],
-        "substitute_count": summary["substitute_count"],
+        "required_member_count": required,
+        "substitute_count": max_subs,
         "team_max_size": summary["team_max_size"],
-        "mandatory_filled": summary["mandatory_filled"],
-        "substitutes_filled": summary["substitutes_filled"],
+        "mandatory_filled": mandatory_filled,
+        "substitutes_filled": subs_filled,
+        "missing_mandatory_members": max(0, int(required) - int(mandatory_filled)),
+        "missing_substitute_slots": max(0, int(max_subs) - int(subs_filled)),
+        "can_add_mandatory_member": (
+            bool(rules)
+            and team.status != TeamStatus.CANCELLED
+            and can_add_role(active_roster, rules, TeamMemberRole.MEMBER)
+        ),
+        "can_add_substitute": (
+            bool(rules)
+            and team.status != TeamStatus.CANCELLED
+            and can_add_role(active_roster, rules, TeamMemberRole.SUBSTITUTE)
+        ),
         "members": members_payload,
     }
 

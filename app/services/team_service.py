@@ -152,6 +152,7 @@ async def _to_member_out(member: TeamMember) -> dict:
         or (profile.contact_email if profile else None),
         "college_name": getattr(member, "college_name", None)
         or (profile.college_name if profile else None),
+        "department": getattr(member, "department", None) or (profile.department if profile else None),
         "year_of_study": getattr(member, "year_of_study", None)
         or (profile.year_of_study if profile else None),
     }
@@ -497,13 +498,16 @@ async def add_roster_member(
     team_id: uuid.UUID,
     profile: Profile,
     payload: RosterAddRequest,
+    *,
+    as_admin: bool = False,
 ) -> dict:
-    """Leader adds a mandatory member or substitute (linked account and/or details)."""
+    """Leader (or admin via as_admin) adds a mandatory member or substitute."""
     team_result = await db.execute(select(Team).where(Team.id == team_id).with_for_update())
     team = team_result.scalar_one_or_none()
     if not team:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Team not found")
-    await _require_leader_or_admin(db, team, profile)
+    if not as_admin:
+        await _require_leader_or_admin(db, team, profile)
     if team.status == TeamStatus.CANCELLED:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Cannot edit a cancelled team")
 
@@ -541,7 +545,7 @@ async def add_roster_member(
         if existing.scalar_one_or_none():
             raise AppError(ALREADY_REGISTERED, "That participant is already on a team for this event", status_code=409)
     else:
-        if rules.member_registration_mode != MemberRegistrationMode.LEADER_MANAGED:
+        if not as_admin and rules.member_registration_mode != MemberRegistrationMode.LEADER_MANAGED:
             raise AppError(
                 LEADER_ENTRY_NOT_ALLOWED,
                 "This event requires members to register themselves",
@@ -583,6 +587,7 @@ async def add_roster_member(
         phone=payload.phone if entry_source == TeamMemberEntrySource.LEADER_ENTERED else None,
         contact_email=payload.contact_email if entry_source == TeamMemberEntrySource.LEADER_ENTERED else None,
         college_name=payload.college_name if entry_source == TeamMemberEntrySource.LEADER_ENTERED else None,
+        department=payload.department if entry_source == TeamMemberEntrySource.LEADER_ENTERED else None,
         year_of_study=payload.year_of_study if entry_source == TeamMemberEntrySource.LEADER_ENTERED else None,
     )
 

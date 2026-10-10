@@ -35,6 +35,7 @@ class TeamMemberOut(BaseModel):
     phone: str | None = None
     contact_email: str | None = None
     college_name: str | None = None
+    department: str | None = None
     year_of_study: str | None = None
 
 
@@ -102,6 +103,7 @@ class RosterAddRequest(BaseModel):
     phone: Optional[str] = Field(default=None, max_length=20)
     contact_email: Optional[str] = Field(default=None, max_length=255)
     college_name: Optional[str] = Field(default=None, max_length=200)
+    department: Optional[str] = Field(default=None, max_length=200)
     year_of_study: Optional[str] = Field(default=None, max_length=50)
     field_responses: list[FieldResponseInput] = []
 
