@@ -40,6 +40,7 @@ from app.services.field_response_validator import persist_field_responses, valid
 from app.services.admin_ops_service import invalidate_dashboard_cache
 from app.services.event_service import invalidate_spots_cache, is_registration_open, spots_remaining
 from app.services import audit_service
+from app.services.google_sheets_service import trigger_registration_sheet_sync
 
 _REGISTRATION_LOAD_OPTS = (
     selectinload(Registration.team).selectinload(Team.members),
@@ -173,6 +174,7 @@ async def create_registration(
         raise_duplicate_registration(exc, "You are already registered for this event")
     invalidate_spots_cache(event_id)
     invalidate_dashboard_cache()
+    trigger_registration_sheet_sync(registration.id)
     return await get_registration_or_404(db, registration.id)
 
 
@@ -335,5 +337,6 @@ async def cancel_unpaid_registration(
     )
     invalidate_spots_cache(registration.event_id)
     invalidate_dashboard_cache()
+    trigger_registration_sheet_sync(registration.id)
     return await get_registration_or_404(db, registration.id)
 

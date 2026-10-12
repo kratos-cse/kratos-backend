@@ -35,4 +35,6 @@ async def update_my_profile(
     await db.commit()
     await db.refresh(db_profile)
     invalidate_user_cache(db_profile.user_id)
+    from app.services.google_sheets_service import trigger_profile_sheet_sync
+    trigger_profile_sheet_sync(db_profile.id)
     return db_profile

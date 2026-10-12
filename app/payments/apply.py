@@ -292,6 +292,11 @@ async def apply_payment_success(
 
     if newly_paid:
         await notification_service.notify_payment_confirmed(db, row.id)
+
+    from app.services.google_sheets_service import trigger_registration_sheet_sync
+
+    if registration:
+        trigger_registration_sheet_sync(registration.id)
     return ApplyResult(applied=newly_paid, payment=row)
 
 
@@ -305,4 +310,10 @@ async def apply_payment_failure(db: AsyncSession, payment_id: UUID) -> ApplyResu
     if payment is None:
         return ApplyResult(applied=False, payment=None)
     await db.commit()
+
+    from app.services.google_sheets_service import trigger_registration_sheet_sync
+    reg = await registration_linked_to_payment(db, payment_id)
+    if reg:
+        trigger_registration_sheet_sync(reg.id)
+
     return ApplyResult(applied=True, payment=_as_row(payment))
