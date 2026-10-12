@@ -921,3 +921,50 @@ async def export_attendance(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=attendance.xlsx"},
     )
+
+
+@router.get("/google-sheets/status")
+async def get_google_sheets_status(
+    _: AdminUser = Depends(require_permission("export")),
+):
+    """Check Google Sheets integration configuration and connectivity."""
+    from app.services.google_sheets_service import (
+        get_access_token,
+        get_service_account_credentials,
+    )
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    creds = get_service_account_credentials()
+    has_creds = creds is not None
+    service_email = creds.service_account_email if creds else None
+    token = get_access_token() if has_creds else None
+
+    return _success(
+        {
+            "sync_enabled": settings.GOOGLE_SHEETS_SYNC_ENABLED,
+            "credentials_configured": has_creds,
+            "service_account_email": service_email,
+            "token_valid": token is not None,
+            "master_spreadsheet_id": settings.GOOGLE_SHEETS_MASTER_SPREADSHEET_ID or None,
+        }
+    )
+
+
+@router.post("/events/{event_id}/sync-sheet")
+async def sync_event_sheet(
+    event_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(require_permission("event-edit")),
+):
+    """Manually trigger a full resync of all event registrations to its Google Sheet."""
+    await require_event_access(db, admin, event_id, "event-edit")
+    from app.services.google_sheets_service import sync_event_to_sheet
+
+    result = await sync_event_to_sheet(db, event_id)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=result.get("error", "Failed to sync to Google Sheet"),
+        )
+    return _success(result)

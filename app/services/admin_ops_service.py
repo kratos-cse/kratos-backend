@@ -408,6 +408,8 @@ async def cancel_team_admin(db: AsyncSession, team_id: uuid.UUID) -> dict[str, A
             await qr_service.deactivate_for_team_member(db, member.id)
 
     await db.commit()
+    from app.services.google_sheets_service import trigger_team_sheet_sync
+    trigger_team_sheet_sync(team.id)
     return {"team_id": team.id, "status": team.status}
 
 
@@ -430,6 +432,8 @@ async def cancel_registration_admin(db: AsyncSession, registration_id: uuid.UUID
             await qr_service.deactivate_for_team_member(db, member.id)
     await db.commit()
     await db.refresh(registration)
+    from app.services.google_sheets_service import trigger_registration_sheet_sync
+    trigger_registration_sheet_sync(registration.id)
     return registration
 
 

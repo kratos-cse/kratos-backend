@@ -75,6 +75,12 @@ class Settings(BaseSettings):
     # --- Public URLs (receipts are generated on demand; no file storage) ---
     APP_PUBLIC_BASE_URL: str = "http://localhost:8000"
 
+    # --- Google Sheets Real-Time Sync ---
+    GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON: str = ""
+    GOOGLE_SHEETS_CREDENTIALS_FILE: str = ""
+    GOOGLE_SHEETS_MASTER_SPREADSHEET_ID: str = ""
+    GOOGLE_SHEETS_SYNC_ENABLED: bool = True
+
     @property
     def cors_origins_list(self) -> List[str]:
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]

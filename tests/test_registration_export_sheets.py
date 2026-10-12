@@ -58,12 +58,15 @@ async def test_single_event_export_predetermined_team_size(db):
     db.add(team)
     await db.flush()
 
+    from datetime import datetime, timezone, timedelta
+    t0 = datetime.now(timezone.utc)
     tm1 = TeamMember(
         team_id=team.id,
         event_id=event.id,
         profile_id=leader.id,
         role=TeamMemberRole.LEADER,
         status=TeamMemberStatus.ACTIVE,
+        joined_at=t0 - timedelta(minutes=10),
     )
     tm2 = TeamMember(
         team_id=team.id,
@@ -71,6 +74,7 @@ async def test_single_event_export_predetermined_team_size(db):
         profile_id=m2.id,
         role=TeamMemberRole.MEMBER,
         status=TeamMemberStatus.ACTIVE,
+        joined_at=t0 - timedelta(minutes=5),
     )
     # Leader-entered 3rd member
     tm3 = TeamMember(
@@ -81,6 +85,7 @@ async def test_single_event_export_predetermined_team_size(db):
         phone="9876543210",
         role=TeamMemberRole.MEMBER,
         status=TeamMemberStatus.ACTIVE,
+        joined_at=t0,
     )
     db.add_all([tm1, tm2, tm3])
 

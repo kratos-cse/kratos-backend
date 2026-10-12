@@ -61,7 +61,10 @@ async def update_team(
     db: AsyncSession = Depends(get_db),
     profile: Profile = Depends(get_current_profile),
 ):
-    return await team_service.update_team(db, team_id=team_id, profile=profile, patch=payload)
+    res = await team_service.update_team(db, team_id=team_id, profile=profile, patch=payload)
+    from app.services.google_sheets_service import trigger_team_sheet_sync
+    trigger_team_sheet_sync(team_id)
+    return res
 
 
 @router.post("/teams/{team_id}/invitations", response_model=InvitationOut)
@@ -85,9 +88,12 @@ async def add_roster_member(
     profile: Profile = Depends(get_current_profile),
 ):
     """Leader adds a mandatory member or substitute (linked account or leader-entered)."""
-    return await team_service.add_roster_member(
+    res = await team_service.add_roster_member(
         db, team_id=team_id, profile=profile, payload=payload
     )
+    from app.services.google_sheets_service import trigger_team_sheet_sync
+    trigger_team_sheet_sync(team_id)
+    return res
 
 
 @router.get("/team-invitations/{invite_code}", response_model=InvitationPublicOut)
@@ -102,12 +108,15 @@ async def join_team(
     db: AsyncSession = Depends(get_db),
     profile: Profile = Depends(get_current_profile),
 ):
-    return await team_service.join_via_invitation(
+    res = await team_service.join_via_invitation(
         db,
         invite_code=invite_code,
         profile=profile,
         field_responses=body.field_responses if body else [],
     )
+    from app.services.google_sheets_service import trigger_team_sheet_sync
+    trigger_team_sheet_sync(res.team_id)
+    return res
 
 
 @router.post("/teams/{team_id}/members/{member_id}/leave", response_model=TeamMemberOut)
@@ -117,7 +126,10 @@ async def leave_team(
     db: AsyncSession = Depends(get_db),
     profile: Profile = Depends(get_current_profile),
 ):
-    return await team_service.leave_team(db, team_id=team_id, member_id=member_id, profile=profile)
+    res = await team_service.leave_team(db, team_id=team_id, member_id=member_id, profile=profile)
+    from app.services.google_sheets_service import trigger_team_sheet_sync
+    trigger_team_sheet_sync(team_id)
+    return res
 
 
 @router.post("/teams/{team_id}/members/{member_id}/remove", response_model=TeamMemberOut)
@@ -127,4 +139,7 @@ async def remove_member(
     db: AsyncSession = Depends(get_db),
     profile: Profile = Depends(get_current_profile),
 ):
-    return await team_service.remove_member(db, team_id=team_id, member_id=member_id, profile=profile)
+    res = await team_service.remove_member(db, team_id=team_id, member_id=member_id, profile=profile)
+    from app.services.google_sheets_service import trigger_team_sheet_sync
+    trigger_team_sheet_sync(team_id)
+    return res
