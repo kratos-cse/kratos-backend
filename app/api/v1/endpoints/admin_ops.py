@@ -185,11 +185,28 @@ async def get_event_metrics(
     return _success(await ops.event_operations_metrics(db, event_id))
 
 
+@router.get("/google-sheets/status")
+async def google_sheets_integration_status(
+    _: AdminUser = Depends(require_permission("export")),
+):
+    """Integration health for the master spreadsheet sync (no secrets)."""
+    import asyncio
+
+    from app.services.google_sheets_service import build_integration_status, probe_service_account_token
+
+    payload = build_integration_status()
+    if payload.get("credentials_configured"):
+        token_valid, token_error = await asyncio.to_thread(probe_service_account_token)
+        payload["token_valid"] = token_valid
+        payload["token_error"] = token_error
+    return _success(payload)
+
+
 @router.post("/events/{event_id}/sync-sheet")
 async def sync_event_google_sheet(
     event_id: UUID,
     db: AsyncSession = Depends(get_db),
-    admin: AdminUser = Depends(require_permission("export")),
+    admin: AdminUser = Depends(require_permission(EVENT_EDIT)),
 ):
     """Resync all registrations for one event into its worksheet tab on the master spreadsheet."""
     from app.services.google_sheets_service import (
@@ -198,7 +215,7 @@ async def sync_event_google_sheet(
         sync_event_to_sheet,
     )
 
-    await require_event_access(db, admin, event_id, "export")
+    await require_event_access(db, admin, event_id, EVENT_EDIT, write=True)
     try:
         result = await sync_event_to_sheet(db, event_id)
     except GoogleSheetsConfigError as exc:

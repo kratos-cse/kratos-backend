@@ -64,6 +64,41 @@ def sheets_sync_enabled() -> bool:
     )
 
 
+def probe_service_account_token() -> tuple[bool | None, str | None]:
+    """Validate credentials with Google. Returns (token_valid, safe_error_message)."""
+    if not service_account_credentials_configured():
+        return None, None
+    try:
+        creds = load_service_account_credentials()
+        from google.auth.transport.requests import Request
+
+        if not creds.valid:
+            creds.refresh(Request())
+        return True, None
+    except GoogleSheetsConfigError as exc:
+        return False, str(exc)
+    except Exception:
+        logger.exception("google_sheets_token_probe_failed")
+        return False, "Service account credentials could not be validated with Google."
+
+
+def build_integration_status(
+    *,
+    token_valid: bool | None = None,
+    token_error: str | None = None,
+) -> dict[str, Any]:
+    """Non-secret Google Sheets integration snapshot for admin status API."""
+    master = (settings.GOOGLE_SHEETS_MASTER_SPREADSHEET_ID or "").strip() or None
+    credentials_configured = service_account_credentials_configured()
+    return {
+        "sync_enabled": sheets_sync_enabled(),
+        "credentials_configured": credentials_configured,
+        "token_valid": token_valid if credentials_configured else None,
+        "master_spreadsheet_id": master,
+        "token_error": token_error if credentials_configured else None,
+    }
+
+
 def load_service_account_credentials():
     """Load Google service-account credentials (JSON env preferred over file)."""
     from google.oauth2 import service_account

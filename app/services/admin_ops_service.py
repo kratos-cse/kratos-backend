@@ -263,6 +263,7 @@ def event_to_dict(event: Event, rules: EventRegistrationRule) -> dict[str, Any]:
         "whatsapp_group_available": bool(event.whatsapp_group_link),
         "google_sheet_id": event.google_sheet_id,
         "google_sheet_url": event.google_sheet_url,
+        "google_sheets_worksheet_title": event.google_sheets_worksheet_title,
         "starts_at": event.starts_at,
         "ends_at": event.ends_at,
         "slot": event.slot,

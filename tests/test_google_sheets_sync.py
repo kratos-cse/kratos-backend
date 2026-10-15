@@ -226,3 +226,15 @@ async def test_sync_event_one_event_only():
 def test_sheets_disabled_skips_trigger():
     with patch.object(gs, "sheets_sync_enabled", return_value=False):
         gs.trigger_registration_sheet_sync(uuid.uuid4())
+
+
+def test_build_integration_status_no_secrets():
+    with patch.object(settings, "GOOGLE_SHEETS_MASTER_SPREADSHEET_ID", "master-abc"), patch.object(
+        settings, "GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON", json.dumps(_VALID_SA_INFO)
+    ), patch.object(settings, "GOOGLE_SHEETS_SERVICE_ACCOUNT_FILE", ""):
+        payload = gs.build_integration_status(token_valid=True, token_error=None)
+    assert payload["sync_enabled"] is True
+    assert payload["credentials_configured"] is True
+    assert payload["master_spreadsheet_id"] == "master-abc"
+    assert payload["token_valid"] is True
+    assert "private_key" not in str(payload)

@@ -164,7 +164,8 @@ Do **not** commit this JSON to Git, frontend env files, or CI logs. Prefer an [A
 Share the spreadsheet with the service account `client_email` from the JSON as **Editor**.
 
 Run migration `0017` (`events.google_sheets_worksheet_title`).  
-Manual resync: `POST /api/v1/admin/events/{event_id}/sync-sheet` (requires `export` permission).
+Admin UI: **Google Sheets** in the admin dashboard (`GET /api/v1/admin/google-sheets/status`, per-event sync).  
+Manual API resync: `POST /api/v1/admin/events/{event_id}/sync-sheet` (requires `event-edit` and event access).
 
 ---
 
