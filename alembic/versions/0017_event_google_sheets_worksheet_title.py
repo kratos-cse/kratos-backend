@@ -2,7 +2,7 @@
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0017_event_google_sheets_worksheet_title"
+revision = "0017"
 down_revision = "0016"
 branch_labels = None
 depends_on = None
