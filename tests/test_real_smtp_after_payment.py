@@ -15,27 +15,26 @@ from tests.conftest import _make_event, _make_solo_registration, _make_user_prof
 pytestmark = [
     requires_db,
     pytest.mark.skipif(
-        os.getenv("RUN_MAILJET_INTEGRATION") != "1",
-        reason="Set RUN_MAILJET_INTEGRATION=1 to run real Mailjet integration tests",
+        os.getenv("RUN_SMTP_INTEGRATION") != "1",
+        reason="Set RUN_SMTP_INTEGRATION=1 to run real SMTP integration tests",
     ),
 ]
 
 
 @pytest.mark.asyncio
-async def test_real_mailjet_after_payment(db, monkeypatch):
-    recipient = os.getenv("MAILJET_TEST_EMAIL", "").strip()
+async def test_real_smtp_after_payment(db, monkeypatch):
+    recipient = os.getenv("SMTP_TEST_EMAIL", "").strip()
     missing = [
         name
         for name, value in (
-            ("MAILJET_TEST_EMAIL", recipient),
-            ("MAILJET_API_KEY", settings.MAILJET_API_KEY),
-            ("MAILJET_SECRET_KEY", settings.MAILJET_SECRET_KEY),
-            ("MAILJET_FROM_EMAIL", settings.MAILJET_FROM_EMAIL),
+            ("SMTP_TEST_EMAIL", recipient),
+            ("SMTP_HOST", settings.SMTP_HOST),
+            ("SMTP_FROM", settings.SMTP_FROM),
         )
         if not value
     ]
     if missing:
-        pytest.skip("Missing required Mailjet integration variables: " + ", ".join(missing))
+        pytest.skip("Missing required SMTP integration variables: " + ", ".join(missing))
 
     database_name = urlsplit(settings.async_database_url).path.lstrip("/")
     if database_name != "kratos_test":
@@ -52,23 +51,23 @@ async def test_real_mailjet_after_payment(db, monkeypatch):
 
     monkeypatch.setattr(notification_service.asyncio, "create_task", capture_task)
 
-    mailjet_result = {}
+    smtp_result = {}
     real_send_email = email_service.send_email
 
-    async def capture_mailjet_result(**kwargs):
+    async def capture_smtp_result(**kwargs):
         result = await real_send_email(**kwargs)
-        mailjet_result["result"] = result
+        smtp_result["result"] = result
         return result
 
-    monkeypatch.setattr(email_service, "send_email", capture_mailjet_result)
+    monkeypatch.setattr(email_service, "send_email", capture_smtp_result)
 
     profile = await _make_user_profile(db, email=recipient)
-    event = await _make_event(db, name=f"Mailjet Post-Payment Test {uuid4().hex[:8]}")
+    event = await _make_event(db, name=f"SMTP Post-Payment Test {uuid4().hex[:8]}")
     registration = await _make_solo_registration(db, event=event, profile=profile)
     payment = Payment(
         payer_profile_id=profile.id,
         payment_type=PaymentType.SOLO_REGISTRATION,
-        razorpay_order_id=f"local-mailjet-order-{uuid4().hex}",
+        razorpay_order_id=f"local-smtp-order-{uuid4().hex}",
         amount_paise=25000,
         currency="INR",
         status=PaymentStatus.CREATED,
@@ -81,7 +80,7 @@ async def test_real_mailjet_after_payment(db, monkeypatch):
     result = await apply_payment_success(
         db,
         payment.id,
-        f"local-mailjet-payment-{uuid4().hex}",
+        f"local-smtp-payment-{uuid4().hex}",
     )
 
     if delivery_tasks:
@@ -92,4 +91,4 @@ async def test_real_mailjet_after_payment(db, monkeypatch):
     await db.refresh(registration)
     assert payment.status == PaymentStatus.PAID
     assert registration.status == RegistrationStatus.CONFIRMED
-    assert mailjet_result.get("result") == (True, None)
+    assert smtp_result.get("result") == (True, None)

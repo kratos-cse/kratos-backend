@@ -178,3 +178,42 @@ class RegistrationFieldType(str, enum.Enum):
 class RegistrationFieldSource(str, enum.Enum):
     CUSTOM = "CUSTOM"
     PROFILE = "PROFILE"
+
+
+# ── HTF 2026 Specific Enums ──────────────────────────────────────────────────
+
+class HTFApplicationStatus(str, enum.Enum):
+    """Lifecycle of a team's HTF application.
+
+    DRAFT         → team formed, app not yet submitted.
+    SUBMITTED     → locked for admin review.
+    SHORTLISTED   → cleared online round; payment gate opens.
+    NOT_SHORTLISTED → eliminated; roster frozen, no payment.
+    CONFIRMED     → payment received; pass active.
+    WITHDRAWN     → team voluntarily withdrew (pre-submission only).
+    """
+
+    DRAFT = "DRAFT"
+    SUBMITTED = "SUBMITTED"
+    SHORTLISTED = "SHORTLISTED"
+    NOT_SHORTLISTED = "NOT_SHORTLISTED"
+    CONFIRMED = "CONFIRMED"
+    WITHDRAWN = "WITHDRAWN"
+
+
+class HTFProblemDomain(str, enum.Enum):
+    """High-level domains that a Problem Statement belongs to."""
+
+    AI_ML = "AI_ML"
+    WEB_DEV = "WEB_DEV"
+    CYBER_SECURITY = "CYBER_SECURITY"
+    IOT_EMBEDDED = "IOT_EMBEDDED"
+    BLOCKCHAIN = "BLOCKCHAIN"
+    OPEN_INNOVATION = "OPEN_INNOVATION"
+
+
+class HTFPassStatus(str, enum.Enum):
+    """Computed status shown on the participant pass."""
+
+    NOT_AVAILABLE = "NOT_AVAILABLE"   # Team not confirmed yet
+    ACTIVE = "ACTIVE"                 # Confirmed + QR ready
