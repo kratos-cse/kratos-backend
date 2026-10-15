@@ -10,6 +10,7 @@ from app.models.event_content import (  # noqa: F401
     RegistrationFieldResponse,
 )
 from app.models.notification import Notification  # noqa: F401
+from app.models.htf_application import HtfApplication, HtfApplicationStatus  # noqa: F401
 from app.models.payment import Payment  # noqa: F401
 from app.models.profile import Profile  # noqa: F401
 from app.models.qr_code import QRCode  # noqa: F401

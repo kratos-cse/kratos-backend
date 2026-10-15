@@ -8,8 +8,9 @@ importable with them blank so `uvicorn app.main:app` and the Swagger UI at
 /docs come up fine — any request that actually needs the DB or Google
 verification will fail with a clear error until those are set.
 """
+import uuid
 from functools import lru_cache
-from typing import List
+from typing import List, Optional
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -19,6 +20,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     ENVIRONMENT: str = "development"
+
+    # --- HTF Hackathon Event ---
+    HTF_EVENT_ID: Optional[uuid.UUID] = None
 
     # --- Database (filled in by team lead once Railway Postgres exists) ---
     DATABASE_URL: str = ""
