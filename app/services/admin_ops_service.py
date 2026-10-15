@@ -381,6 +381,9 @@ async def transfer_team_leadership(
 
     await db.commit()
     await db.refresh(team)
+    from app.services.google_sheets_triggers import trigger_team_sheet_sync
+
+    trigger_team_sheet_sync(team.id)
     return {"team_id": team.id, "leader_profile_id": team.leader_profile_id}
 
 
@@ -408,6 +411,9 @@ async def cancel_team_admin(db: AsyncSession, team_id: uuid.UUID) -> dict[str, A
             await qr_service.deactivate_for_team_member(db, member.id)
 
     await db.commit()
+    from app.services.google_sheets_triggers import trigger_team_sheet_sync
+
+    trigger_team_sheet_sync(team.id)
     return {"team_id": team.id, "status": team.status}
 
 
@@ -430,6 +436,9 @@ async def cancel_registration_admin(db: AsyncSession, registration_id: uuid.UUID
             await qr_service.deactivate_for_team_member(db, member.id)
     await db.commit()
     await db.refresh(registration)
+    from app.services.google_sheets_triggers import trigger_registration_sheet_sync
+
+    trigger_registration_sheet_sync(registration.id)
     return registration
 
 
@@ -726,6 +735,24 @@ def _build_registration_row(
         custom_cells.append(val)
 
     return row_start + member_cells + row_end + custom_cells
+
+
+async def get_event_registration_sheet_rows(
+    db: AsyncSession,
+    event_id: uuid.UUID,
+) -> tuple[list[str], dict[uuid.UUID, list[Any]]]:
+    """Ordered headers and registration_id -> row for Google Sheets / exports."""
+    headers, rows = await _get_registration_export_data(db, event_id=event_id)
+    by_id: dict[uuid.UUID, list[Any]] = {}
+    for row in rows:
+        if not row:
+            continue
+        try:
+            reg_id = uuid.UUID(str(row[0]))
+        except (ValueError, TypeError):
+            continue
+        by_id[reg_id] = row
+    return headers, by_id
 
 
 async def _get_registration_export_data(

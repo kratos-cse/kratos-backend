@@ -292,6 +292,13 @@ async def apply_payment_success(
 
     if newly_paid:
         await notification_service.notify_payment_confirmed(db, row.id)
+
+    registration_after = await registration_linked_to_payment(db, payment.id)
+    if registration_after is not None:
+        from app.services.google_sheets_triggers import trigger_registration_sheet_sync
+
+        trigger_registration_sheet_sync(registration_after.id)
+
     return ApplyResult(applied=newly_paid, payment=row)
 
 

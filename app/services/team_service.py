@@ -650,6 +650,9 @@ async def add_roster_member(
         except Exception:
             pass
 
+    from app.services.google_sheets_triggers import trigger_team_sheet_sync
+
+    trigger_team_sheet_sync(team.id)
     return await _to_detail(db, team, rules)
 
 
@@ -672,6 +675,9 @@ async def leave_team(
     member.status = TeamMemberStatus.LEFT
     await db.commit()
     invalidate_spots_cache(team.event_id)
+    from app.services.google_sheets_triggers import trigger_team_sheet_sync
+
+    trigger_team_sheet_sync(team.id)
     await db.refresh(member)
     return await _to_member_out(member)
 

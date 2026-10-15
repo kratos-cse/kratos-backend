@@ -141,6 +141,33 @@ Use a **new** secret in production; never commit it.
 
 ---
 
+## 3b. Google Sheets sync (optional)
+
+Master spreadsheet: one tab per event.
+
+### Local development
+
+| Variable | Description |
+|----------|-------------|
+| `GOOGLE_SHEETS_MASTER_SPREADSHEET_ID` | Spreadsheet ID from the Google Sheets URL (`/d/<id>/edit`) |
+| `GOOGLE_SHEETS_SERVICE_ACCOUNT_FILE` | Absolute path to the downloaded service-account JSON key file |
+
+### Azure App Service (production)
+
+| Application setting | Value |
+|---------------------|--------|
+| `GOOGLE_SHEETS_MASTER_SPREADSHEET_ID` | Your master spreadsheet ID |
+| `GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON` | **Entire** contents of the service-account JSON file (one line or minified JSON). Takes precedence over `GOOGLE_SHEETS_SERVICE_ACCOUNT_FILE`. |
+
+Do **not** commit this JSON to Git, frontend env files, or CI logs. Prefer an [Azure Key Vault reference](https://learn.microsoft.com/azure/app-service/app-service-key-vault-references) as the app setting value (`@Microsoft.KeyVault(...)`) and grant the App Service **managed identity** access to read that secret.
+
+Share the spreadsheet with the service account `client_email` from the JSON as **Editor**.
+
+Run migration `0017` (`events.google_sheets_worksheet_title`).  
+Manual resync: `POST /api/v1/admin/events/{event_id}/sync-sheet` (requires `export` permission).
+
+---
+
 ## 4. Razorpay (test mode)
 
 **Where:** [Razorpay Dashboard](https://dashboard.razorpay.com/)

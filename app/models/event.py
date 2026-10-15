@@ -40,6 +40,7 @@ class Event(Base):
     whatsapp_group_link: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     google_sheet_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     google_sheet_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    google_sheets_worksheet_title: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     starts_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     ends_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     visibility: Mapped[EventVisibility] = mapped_column(

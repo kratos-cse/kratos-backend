@@ -140,6 +140,9 @@ async def create_registration(
             raise_duplicate_registration(exc, "You are already registered for this event")
         invalidate_spots_cache(event_id)
         invalidate_dashboard_cache()
+        from app.services.google_sheets_triggers import trigger_registration_sheet_sync
+
+        trigger_registration_sheet_sync(registration.id)
         return await get_registration_or_404(db, registration.id)
 
     # TEAM
@@ -173,6 +176,9 @@ async def create_registration(
         raise_duplicate_registration(exc, "You are already registered for this event")
     invalidate_spots_cache(event_id)
     invalidate_dashboard_cache()
+    from app.services.google_sheets_triggers import trigger_registration_sheet_sync
+
+    trigger_registration_sheet_sync(registration.id)
     return await get_registration_or_404(db, registration.id)
 
 
@@ -335,5 +341,8 @@ async def cancel_unpaid_registration(
     )
     invalidate_spots_cache(registration.event_id)
     invalidate_dashboard_cache()
+    from app.services.google_sheets_triggers import trigger_registration_sheet_sync
+
+    trigger_registration_sheet_sync(registration.id)
     return await get_registration_or_404(db, registration.id)
 

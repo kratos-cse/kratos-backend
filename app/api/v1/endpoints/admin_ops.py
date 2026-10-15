@@ -185,6 +185,39 @@ async def get_event_metrics(
     return _success(await ops.event_operations_metrics(db, event_id))
 
 
+@router.post("/events/{event_id}/sync-sheet")
+async def sync_event_google_sheet(
+    event_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(require_permission("export")),
+):
+    """Resync all registrations for one event into its worksheet tab on the master spreadsheet."""
+    from app.services.google_sheets_service import (
+        GoogleSheetsConfigError,
+        GoogleSheetsSyncError,
+        sync_event_to_sheet,
+    )
+
+    await require_event_access(db, admin, event_id, "export")
+    try:
+        result = await sync_event_to_sheet(db, event_id)
+    except GoogleSheetsConfigError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except GoogleSheetsSyncError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return _success(
+        {
+            "success": result.success,
+            "spreadsheet_id": result.spreadsheet_id,
+            "spreadsheet_url": result.spreadsheet_url,
+            "worksheet_title": result.worksheet_title,
+            "synced_count": result.synced_count,
+            "failed_count": result.failed_count,
+            "errors": result.errors,
+        }
+    )
+
+
 @router.patch("/events/{event_id}")
 async def patch_event(
     event_id: UUID,
@@ -425,6 +458,9 @@ async def update_participant(
         setattr(profile, field, value)
     await db.commit()
     await db.refresh(profile)
+    from app.services.google_sheets_triggers import trigger_profile_sheet_sync
+
+    trigger_profile_sheet_sync(profile.id)
     return _success(
         {
             "profile_id": profile.id,
@@ -465,6 +501,9 @@ async def manual_register_participant(
     db.add(registration)
     await db.commit()
     await db.refresh(registration)
+    from app.services.google_sheets_triggers import trigger_registration_sheet_sync
+
+    trigger_registration_sheet_sync(registration.id)
     return _success(
         {
             "registration_id": registration.id,
@@ -571,6 +610,9 @@ async def patch_team(
         setattr(team, field, value)
     await db.commit()
     await db.refresh(team)
+    from app.services.google_sheets_triggers import trigger_team_sheet_sync
+
+    trigger_team_sheet_sync(team.id)
     return _success(
         {
             "id": team.id,
@@ -734,6 +776,9 @@ async def patch_registration(
         registration.status = body.status
     await db.commit()
     await db.refresh(registration)
+    from app.services.google_sheets_triggers import trigger_registration_sheet_sync
+
+    trigger_registration_sheet_sync(registration.id)
     return _success(
         {
             "id": registration.id,
