@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timezone
 from email import encoders
 from email.message import EmailMessage
+from email.utils import formataddr
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -34,6 +35,19 @@ from app.models.registration import Registration
 from app.models.team import Team, TeamMember
 
 logger = logging.getLogger("notification_service")
+
+# Prevent fire-and-forget tasks from being garbage-collected.
+# Python's event loop only keeps weak references to tasks, so without
+# storing a strong reference the GC can destroy the task before the
+# email is ever sent.  See https://docs.python.org/3/library/asyncio-task.html
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _fire_and_forget(coro) -> None:
+    """Schedule a background coroutine with prevented garbage collection."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 async def _resolve_email(db: AsyncSession, profile_id: UUID) -> Optional[str]:
@@ -182,9 +196,15 @@ async def _send_smtp(
     if not settings.SMTP_HOST or not settings.SMTP_FROM:
         return False, "SMTP not configured (SMTP_HOST / SMTP_FROM missing)"
 
+    from_header = (
+        formataddr((settings.SMTP_FROM_NAME, settings.SMTP_FROM))
+        if settings.SMTP_FROM_NAME
+        else settings.SMTP_FROM
+    )
+
     if inline_images:
         message = MIMEMultipart("related")
-        message["From"] = settings.SMTP_FROM
+        message["From"] = from_header
         message["To"] = to_email
         message["Subject"] = subject
         alt = MIMEMultipart("alternative")
@@ -201,7 +221,7 @@ async def _send_smtp(
             message.attach(img)
     else:
         message = EmailMessage()
-        message["From"] = settings.SMTP_FROM
+        message["From"] = from_header
         message["To"] = to_email
         message["Subject"] = subject
         message.set_content(body)
@@ -221,6 +241,7 @@ async def _send_smtp(
             ),
             timeout=15.0,
         )
+        logger.info("smtp_send_ok to=%s subject=%s", to_email, subject)
         return True, None
     except Exception as exc:
         logger.exception("SMTP send failed to=%s subject=%s", to_email, subject)
@@ -238,6 +259,7 @@ async def _deliver_notification_bg(
 ) -> None:
     from app.db.session import AsyncSessionLocal
 
+    logger.info("deliver_notification_bg_start id=%s to=%s", notification_id, to_email)
     ok, err = await _send_email(
         to_email, subject, body, html_body=html_body, inline_images=inline_images
     )
@@ -302,7 +324,7 @@ async def create_and_send(
     await db.refresh(notification)
 
     effective_html = html_body or _html_from_plain(body, subject)
-    asyncio.create_task(
+    _fire_and_forget(
         _deliver_notification_bg(notification.id, to_email, subject, body, effective_html)
     )
     return notification
@@ -352,7 +374,7 @@ async def create_and_send_with_inline_image(
     await db.commit()
     await db.refresh(notification)
 
-    asyncio.create_task(
+    _fire_and_forget(
         _deliver_notification_bg(
             notification.id,
             to_email,
@@ -392,7 +414,7 @@ async def resend(db: AsyncSession, notification_id: UUID) -> Notification:
     if not html_body:
         html_body = _html_from_plain(notification.body, notification.subject)
 
-    asyncio.create_task(
+    _fire_and_forget(
         _deliver_notification_bg(
             notification.id,
             to_email,
