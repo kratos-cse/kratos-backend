@@ -31,6 +31,7 @@ class EventCategory(str, enum.Enum):
     SPARK = "SPARK"
     ONLINE = "ONLINE"
     TITLE_EVENT = "TITLE_EVENT"
+    PROJECT_EXPO = "PROJECT_EXPO"
 
     @classmethod
     def _missing_(cls, value):

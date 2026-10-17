@@ -38,6 +38,7 @@ def test_event_category_values_locked():
         "SPARK",
         "ONLINE",
         "TITLE_EVENT",
+        "PROJECT_EXPO",
     }
     assert "SPORTS" not in {c.value for c in EventCategory}
 
@@ -102,7 +103,7 @@ def test_event_state_transitions():
     )
     publish_event(event)
     assert event.visibility == EventVisibility.PUBLISHED
-    assert event.registration_status == EventRegistrationStatus.CLOSED
+    assert event.registration_status == EventRegistrationStatus.COMING_SOON
 
     open_registration(event)
     assert event.registration_status == EventRegistrationStatus.OPEN
