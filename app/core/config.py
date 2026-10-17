@@ -64,6 +64,7 @@ class Settings(BaseSettings):
     SMTP_USER: str = ""
     SMTP_PASSWORD: str = ""
     SMTP_FROM: str = ""
+    SMTP_FROM_NAME: str = "KRATOS'26"
     SMTP_TLS: bool = True
 
     # --- Mailjet (separate transactional email system) ---
