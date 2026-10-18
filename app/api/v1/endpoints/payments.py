@@ -101,7 +101,13 @@ async def verify_payment(
         key_secret=settings.RAZORPAY_KEY_SECRET,
     )
     if not valid:
-        raise HTTPException(status_code=400, detail="Invalid signature")
+        from app.core.errors import INVALID_PAYMENT_SIGNATURE, AppError
+
+        raise AppError(
+            INVALID_PAYMENT_SIGNATURE,
+            "We could not verify this payment. Contact support if money was deducted.",
+            status_code=400,
+        )
 
     applied = await apply_payment_success(db, payment.id, body.razorpay_payment_id)
     return {"paymentId": str(payment.id), "applied": applied.applied, "status": "PAID"}

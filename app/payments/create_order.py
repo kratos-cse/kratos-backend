@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.errors import PAYMENT_ALREADY_PROCESSED, AppError
+from app.core.errors import PAYMENT_ALREADY_PROCESSED, PAYMENT_GATEWAY_UNAVAILABLE, AppError
 from app.models.enums import PaymentStatus, PaymentType, RegistrationStatus
 from app.models.event import EventRegistrationRule
 from app.models.payment import Payment
@@ -188,12 +188,20 @@ async def create_payment_order(
             )
         )
     except requests.RequestException:
-        raise HTTPException(status_code=503, detail=razorpay_unavailable_message())
+        raise AppError(
+            PAYMENT_GATEWAY_UNAVAILABLE,
+            razorpay_unavailable_message(),
+            status_code=503,
+        )
     except Exception as err:
         from razorpay.errors import BadRequestError, GatewayError, ServerError
 
         if isinstance(err, (ServerError, GatewayError)):
-            raise HTTPException(status_code=503, detail=razorpay_unavailable_message())
+            raise AppError(
+                PAYMENT_GATEWAY_UNAVAILABLE,
+                razorpay_unavailable_message(),
+                status_code=503,
+            )
         if isinstance(err, BadRequestError):
             raise HTTPException(status_code=400, detail="Could not create payment order. Check event fee settings.")
         raise
