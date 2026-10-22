@@ -21,6 +21,7 @@ from app.models.event_content import EventRegistrationField
 from app.models.team import TeamMember
 from app.schemas.team import RosterAddRequest
 from app.services import team_service
+from app.services.roster_service import apply_roster_to_rules
 
 from tests.conftest import _make_event, _make_team_registration, _make_user_profile, requires_db
 
@@ -110,6 +111,54 @@ async def test_add_roster_fills_mandatory_then_substitute_then_rejects(db):
             team.id,
             leader,
             _member_payload(full_name="Too Many", phone="93000000001"),
+        )
+    assert exc.value.code in (TEAM_FULL, "TEAM_FULL")
+
+
+@pytest.mark.asyncio
+async def test_range_min3_max4_allows_fourth_member_then_rejects_fifth(db):
+    leader = await _make_user_profile(db, email=f"range34-{uuid.uuid4().hex}@t.local")
+    event = await _make_event(db, name=f"Range34 {uuid.uuid4().hex[:6]}", team=True)
+    rules = (
+        await db.execute(select(EventRegistrationRule).where(EventRegistrationRule.event_id == event.id))
+    ).scalar_one()
+    rules.member_registration_mode = MemberRegistrationMode.LEADER_MANAGED
+    rules.registration_mode = RegistrationMode.TEAM_ONLY
+    apply_roster_to_rules(rules, roster_style_value="RANGE", team_min_size=3, team_max_size=4)
+    await db.flush()
+
+    team, registration = await _make_team_registration(db, event=event, leader=leader)
+    team.status = TeamStatus.PAID
+    registration.status = RegistrationStatus.CONFIRMED
+    leader_row = (
+        await db.execute(
+            select(TeamMember).where(
+                TeamMember.team_id == team.id,
+                TeamMember.profile_id == leader.id,
+            )
+        )
+    ).scalar_one()
+    leader_row.status = TeamMemberStatus.ACTIVE
+    await db.flush()
+
+    for i in range(3):
+        await team_service.add_roster_member(
+            db,
+            team.id,
+            leader,
+            _member_payload(full_name=f"M{i}", phone=f"960000000{i:02d}"),
+        )
+
+    detail = await team_service.get_team(db, team.id, leader)
+    assert detail["team_max_size"] == 4
+    assert detail["active_member_count"] == 4
+
+    with pytest.raises(AppError) as exc:
+        await team_service.add_roster_member(
+            db,
+            team.id,
+            leader,
+            _member_payload(full_name="TooMany", phone="96000000099"),
         )
     assert exc.value.code in (TEAM_FULL, "TEAM_FULL")
 

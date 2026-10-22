@@ -44,6 +44,7 @@ class EventListItem(BaseModel):
     team_max_size: int
     required_member_count: int = 1
     substitute_count: int = 0
+    roster_style: str = "FIXED"
 
 
 class EventDetail(BaseModel):
@@ -78,6 +79,7 @@ class EventDetail(BaseModel):
     team_max_size: int
     required_member_count: int = 1
     substitute_count: int = 0
+    roster_style: str = "FIXED"
     allow_individual: bool
     registration_mode: RegistrationMode | None
     capacity_type: CapacityType | None

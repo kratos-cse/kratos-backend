@@ -115,7 +115,7 @@ def test_range_can_add_optional_member_before_team_max():
     members = [_member(TeamMemberRole.LEADER)] + [
         _member(TeamMemberRole.MEMBER) for _ in range(2)
     ]
-    rules = _rules(3, 1, team_min=3, team_max=4, roster_style="RANGE")
+    rules = _rules(3, 0, team_min=3, team_max=4, roster_style="RANGE")
     assert can_add_role(members, rules, TeamMemberRole.MEMBER)
     members += [_member(TeamMemberRole.MEMBER)]
     assert not can_add_role(members, rules, TeamMemberRole.MEMBER)
@@ -130,7 +130,7 @@ def test_members_subs_next_join_role_uses_substitute():
 
 
 def test_min_3_max_4_optional_fourth_member():
-    rules = _rules(3, 1, team_min=3, team_max=4, roster_style="RANGE")
+    rules = _rules(3, 0, team_min=3, team_max=4, roster_style="RANGE")
     members = [_member(TeamMemberRole.LEADER)] + [_member(TeamMemberRole.MEMBER) for _ in range(2)]
     assert mandatory_met(members, rules)
     assert next_join_role(members, rules) == TeamMemberRole.MEMBER

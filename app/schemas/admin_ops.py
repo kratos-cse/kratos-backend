@@ -71,7 +71,8 @@ class AdminEventCreate(BaseModel):
             self.team_min_size = mn
             self.team_max_size = mx
             self.required_member_count = mn
-            self.substitute_count = mx - mn
+            # Optional RANGE slots are not substitute slots; apply_roster_to_rules sets subs=0 for RANGE.
+            self.substitute_count = 0
         return self
 
 
