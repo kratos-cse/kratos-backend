@@ -790,6 +790,11 @@ async def patch_registration(
         raise HTTPException(status_code=404, detail="Registration not found.")
     await require_event_access(db, admin, registration.event_id, "registration-edit", write=True)
     if body.status is not None:
+        if (
+            body.status == RegistrationStatus.PENDING
+            and registration.status == RegistrationStatus.CONFIRMED
+        ):
+            return _success(await ops.revoke_registration_confirmation_admin(db, registration_id))
         registration.status = body.status
     await db.commit()
     await db.refresh(registration)
@@ -803,6 +808,21 @@ async def patch_registration(
             "status": registration.status,
         }
     )
+
+
+@router.post("/registrations/{registration_id}/revoke-confirmation")
+async def revoke_registration_confirmation(
+    registration_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _: AdminUser = Depends(require_mutation_admin),
+    admin: AdminUser = Depends(require_permission("registration-edit")),
+):
+    result = await db.execute(select(Registration).where(Registration.id == registration_id))
+    registration = result.scalar_one_or_none()
+    if not registration:
+        raise HTTPException(status_code=404, detail="Registration not found.")
+    await require_event_access(db, admin, registration.event_id, "registration-edit", write=True)
+    return _success(await ops.revoke_registration_confirmation_admin(db, registration_id))
 
 
 @router.post("/registrations/{registration_id}/cancel")

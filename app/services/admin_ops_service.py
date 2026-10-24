@@ -40,6 +40,7 @@ from app.models.event_content import (
 )
 from app.models.payment import Payment
 from app.models.profile import Profile
+from app.models.qr_code import QRCode
 from app.models.registration import Registration
 from app.models.team import Team, TeamMember
 from app.schemas.event_content import FieldResponseOut
@@ -441,6 +442,91 @@ async def cancel_registration_admin(db: AsyncSession, registration_id: uuid.UUID
 
     trigger_registration_sheet_sync(registration.id)
     return registration
+
+
+async def _registration_has_attendance_scans(db: AsyncSession, registration: Registration) -> bool:
+    """True if any QR tied to this registration or its team members was scanned."""
+    member_ids: list[uuid.UUID] = []
+    if registration.team_id:
+        member_ids = list(
+            (
+                await db.execute(select(TeamMember.id).where(TeamMember.team_id == registration.team_id))
+            ).scalars()
+        )
+
+    qr_filters = [QRCode.registration_id == registration.id]
+    if member_ids:
+        qr_filters.append(QRCode.team_member_id.in_(member_ids))
+
+    qr_ids = select(QRCode.id).where(or_(*qr_filters))
+    count = (
+        await db.execute(
+            select(func.count()).select_from(AttendanceScan).where(AttendanceScan.qr_id.in_(qr_ids))
+        )
+    ).scalar_one()
+    return int(count or 0) > 0
+
+
+async def revoke_registration_confirmation_admin(
+    db: AsyncSession, registration_id: uuid.UUID
+) -> dict[str, Any]:
+    """
+    Undo admin or mistaken confirmation: CONFIRMED → PENDING.
+
+    Deactivates QR codes and reverts paid teams to FORMING. Does not refund or
+    change payment rows; use cancel registration for a full withdrawal.
+    """
+    result = await db.execute(
+        select(Registration).where(Registration.id == registration_id).with_for_update()
+    )
+    registration = result.scalar_one_or_none()
+    if not registration:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Registration not found.")
+    if registration.status == RegistrationStatus.CANCELLED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cancelled registrations cannot be revoked.",
+        )
+    if registration.status != RegistrationStatus.CONFIRMED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only confirmed registrations can be revoked to pending.",
+        )
+    if await _registration_has_attendance_scans(db, registration):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot revoke confirmation after attendance has been recorded.",
+        )
+
+    registration.status = RegistrationStatus.PENDING
+    await qr_service.deactivate_for_registration(db, registration.id)
+
+    team_status_after: TeamStatus | None = None
+    if registration.team_id:
+        team_result = await db.execute(
+            select(Team).where(Team.id == registration.team_id).with_for_update()
+        )
+        team = team_result.scalar_one_or_none()
+        if team and team.status in (TeamStatus.PAID, TeamStatus.COMPLETE):
+            team.status = TeamStatus.FORMING
+            team_status_after = team.status
+        members = await db.execute(select(TeamMember).where(TeamMember.team_id == registration.team_id))
+        for member in members.scalars().all():
+            await qr_service.deactivate_for_team_member(db, member.id)
+
+    await db.commit()
+    await db.refresh(registration)
+    from app.services.google_sheets_triggers import trigger_registration_sheet_sync
+
+    trigger_registration_sheet_sync(registration.id)
+    return {
+        "id": registration.id,
+        "event_id": registration.event_id,
+        "status": registration.status,
+        "team_id": registration.team_id,
+        "team_status": team_status_after,
+        "payment_unchanged": True,
+    }
 
 
 def _format_worksheet(ws, headers: list[str], rows: list[list[Any]]):
