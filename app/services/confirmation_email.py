@@ -49,6 +49,24 @@ logger = logging.getLogger("confirmation_email")
 
 QR_CONTENT_ID = "participant-qr"
 _ACTIVE_MEMBER = (TeamMemberStatus.ACTIVE, TeamMemberStatus.PENDING_PAYMENT)
+_TERMINAL_MEMBER = (TeamMemberStatus.LEFT, TeamMemberStatus.REMOVED)
+
+
+def roster_members_for_confirmation(team: Team) -> list[TeamMember]:
+    """All roster participants who should receive entry passes (leader-entered, invite, linked)."""
+    return [m for m in (team.members or []) if m.status not in _TERMINAL_MEMBER]
+
+
+async def load_roster_members_for_confirmation(db: AsyncSession, team_id: UUID) -> list[TeamMember]:
+    result = await db.execute(
+        select(TeamMember)
+        .options(selectinload(TeamMember.profile))
+        .where(
+            TeamMember.team_id == team_id,
+            TeamMember.status.notin_(_TERMINAL_MEMBER),
+        )
+    )
+    return list(result.scalars().all())
 
 
 def _app_url() -> str:
@@ -77,6 +95,11 @@ def dedupe_key_team_member(payment_id: UUID, team_member_id: UUID) -> str:
 
 def dedupe_key_member_join(team_member_id: UUID) -> str:
     return f"reg_confirm:team_member:{team_member_id}"
+
+
+def dedupe_key_admin_resend(client_request_id: str, recipient_key: str) -> str:
+    """Distinct dedupe key per authorised admin resend attempt (does not block original send key)."""
+    return f"reg_confirm:admin_resend:{client_request_id}:{recipient_key}"
 
 
 async def confirmation_was_sent(db: AsyncSession, dedupe_key: str) -> bool:
@@ -390,8 +413,11 @@ async def _send_one(
     registration_id: Optional[UUID],
     team_id: Optional[UUID],
     team_member_id: Optional[UUID],
+    skip_dedupe: bool = False,
+    deliver_sync: bool = False,
+    extra_payload: Optional[dict[str, Any]] = None,
 ) -> Optional[Notification]:
-    if await confirmation_was_sent(db, dedupe_key):
+    if not skip_dedupe and await confirmation_was_sent(db, dedupe_key):
         logger.info("confirmation_email_skipped dedupe_key=%s", dedupe_key)
         return None
 
@@ -401,6 +427,24 @@ async def _send_one(
     }
     if team_member_id:
         payload["team_member_id"] = str(team_member_id)
+    if extra_payload:
+        payload.update(extra_payload)
+
+    if deliver_sync:
+        return await notification_service.create_and_deliver_inline_image_sync(
+            db,
+            profile_id=profile_id,
+            kind=NotificationKind.REGISTRATION_CONFIRMATION,
+            subject=content.subject,
+            body=content.text_body,
+            html_body=content.html_body,
+            inline_images=[(QR_CONTENT_ID, "image/png", content.qr_png)],
+            payment_id=payment_id,
+            registration_id=registration_id,
+            team_id=team_id,
+            payload=payload,
+            to_email=to_email,
+        )
 
     return await notification_service.create_and_send_with_inline_image(
         db,
@@ -503,17 +547,7 @@ async def send_team_payment_confirmations(db: AsyncSession, payment_id: UUID) ->
     if not event or not team:
         return
 
-    members = (
-        await db.execute(
-            select(TeamMember)
-            .options(selectinload(TeamMember.profile))
-            .where(
-                TeamMember.team_id == team.id,
-                TeamMember.status == TeamMemberStatus.ACTIVE,
-            )
-        )
-    ).scalars().all()
-
+    members = await load_roster_members_for_confirmation(db, team.id)
     active_count = len(members)
     receipt_number, _, _ = await _receipt_links(db, payment, payment.payer_profile_id)
 
@@ -616,7 +650,7 @@ async def send_team_member_confirmation(
             .where(TeamMember.id == team_member_id)
         )
     ).scalar_one_or_none()
-    if not member or member.status != TeamMemberStatus.ACTIVE:
+    if not member or member.status in _TERMINAL_MEMBER:
         return
 
     team = (
@@ -659,14 +693,7 @@ async def send_team_member_confirmation(
                 db, payment, member.profile_id
             )
 
-    members_count = (
-        await db.execute(
-            select(TeamMember).where(
-                TeamMember.team_id == team.id,
-                TeamMember.status == TeamMemberStatus.ACTIVE,
-            )
-        )
-    ).scalars().all()
+    members_count = roster_members_for_confirmation(team) if team else []
 
     dedupe = (
         dedupe_key_team_member(registration.payment_id, member.id)
@@ -688,7 +715,7 @@ async def send_team_member_confirmation(
         registration_page_url=_registration_page_url(registration.id),
         team_name=team.name,
         role_label=_role_label(member.role),
-        team_member_count=len(members_count),
+        team_member_count=len(members_count) if isinstance(members_count, list) else members_count,
     )
     await _send_one(
         db,

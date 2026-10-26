@@ -293,6 +293,68 @@ async def create_and_send_with_inline_image(
     return notification
 
 
+async def create_and_deliver_inline_image_sync(
+    db: AsyncSession,
+    profile_id: UUID,
+    kind: NotificationKind,
+    subject: str,
+    body: str,
+    *,
+    html_body: str,
+    inline_images: Sequence[tuple[str, str, bytes]],
+    to_email: str,
+    channel: str = "EMAIL",
+    payload: Optional[dict[str, Any]] = None,
+    payment_id: Optional[UUID] = None,
+    registration_id: Optional[UUID] = None,
+    team_id: Optional[UUID] = None,
+) -> Notification:
+    """Create notification row and deliver via SMTP in-request (for admin resend)."""
+    stored_payload = dict(payload or {})
+    stored_payload["html_body"] = html_body
+    stored_payload["has_inline_qr"] = True
+    stored_payload["to_email"] = to_email
+
+    notification = Notification(
+        profile_id=profile_id,
+        kind=kind,
+        channel=channel,
+        status=NotificationStatus.PENDING,
+        subject=subject,
+        body=body,
+        payload=stored_payload or None,
+        payment_id=payment_id,
+        registration_id=registration_id,
+        team_id=team_id,
+    )
+    db.add(notification)
+    await db.flush()
+
+    if not to_email.strip():
+        notification.status = NotificationStatus.FAILED
+        notification.error = "No contact email for recipient"
+        await db.commit()
+        return notification
+
+    ok, err = await _send_email(
+        to_email,
+        subject,
+        body,
+        html_body=html_body,
+        inline_images=inline_images,
+    )
+    if ok:
+        notification.status = NotificationStatus.SENT
+        notification.sent_at = datetime.now(timezone.utc)
+        notification.error = None
+    else:
+        notification.status = NotificationStatus.FAILED
+        notification.error = err
+    await db.commit()
+    await db.refresh(notification)
+    return notification
+
+
 async def resend(db: AsyncSession, notification_id: UUID) -> Notification:
     result = await db.execute(select(Notification).where(Notification.id == notification_id))
     notification = result.scalar_one_or_none()

@@ -26,7 +26,9 @@ async def ensure_qr_for_registration(db: AsyncSession, registration: Registratio
         members_result = await db.execute(
             select(TeamMember).where(
                 TeamMember.team_id == registration.team_id,
-                TeamMember.status == TeamMemberStatus.ACTIVE,
+                TeamMember.status.notin_(
+                    (TeamMemberStatus.LEFT, TeamMemberStatus.REMOVED)
+                ),
             )
         )
         for member in members_result.scalars().all():

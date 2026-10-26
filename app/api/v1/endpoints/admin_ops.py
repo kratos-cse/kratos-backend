@@ -4,6 +4,7 @@ from urllib.parse import quote
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,6 +53,7 @@ from app.payments.admin_recover import PaymentRecoveryError, preview_recover_cap
 from app.schemas.event_assignment import EventAssignmentCreate
 from app.services import admin_delete_service, admin_ops_service as ops
 from app.services import event_assignment_service as assignment_svc
+from app.services import admin_confirmation_resend
 from app.services.event_access_service import (
     require_event_access,
     resolve_scoped_event_ids_for_collection,
@@ -739,6 +741,165 @@ async def get_registration_detail(
     detail = await ops.get_admin_registration_detail(db, registration_id)
     await require_event_access(db, admin, detail["event_id"], "registration-read")
     return _success(detail)
+
+
+class ConfirmationResendBody(BaseModel):
+    client_request_id: str = Field(min_length=8, max_length=128)
+    scope: str = Field(default="all_members", pattern="^(all_members|member)$")
+    team_member_id: Optional[UUID] = None
+
+
+def _resend_preview_out(preview: admin_confirmation_resend.ResendPreview) -> dict:
+    return {
+        "eligible": preview.eligible,
+        "reason": preview.reason,
+        "registration_id": preview.registration_id,
+        "registration_status": preview.registration_status,
+        "payment_status": preview.payment_status,
+        "event_name": preview.event_name,
+        "registration_type": preview.registration_type,
+        "recipients": [
+            {
+                "team_member_id": r.team_member_id,
+                "profile_id": r.profile_id,
+                "participant_name": r.participant_name,
+                "email": r.email,
+                "has_qr": r.has_qr,
+                "qr_error": r.qr_error,
+            }
+            for r in preview.recipients
+        ],
+    }
+
+
+def _resend_outcome_out(outcome: admin_confirmation_resend.ResendOutcome) -> dict:
+    return {
+        "idempotent_replay": outcome.idempotent_replay,
+        "delivered_count": outcome.delivered_count,
+        "failed_count": outcome.failed_count,
+        "results": [
+            {
+                "team_member_id": r.team_member_id,
+                "participant_name": r.participant_name,
+                "email": r.email,
+                "delivered": r.delivered,
+                "notification_id": r.notification_id,
+                "error": r.error,
+            }
+            for r in outcome.results
+        ],
+    }
+
+
+@router.get("/events/{event_id}/confirmation-email/preview")
+async def preview_event_confirmation_email_resend(
+    event_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(require_permission("notification", "registration-read")),
+):
+    await require_event_access(db, admin, event_id, "registration-read")
+    try:
+        preview = await admin_confirmation_resend.preview_event_resend_confirmation(db, event_id)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc))
+    return _success(
+        {
+            "event_id": preview.event_id,
+            "event_name": preview.event_name,
+            "confirmed_registration_count": preview.confirmed_registration_count,
+            "recipient_count": preview.recipient_count,
+            "deliverable_recipient_count": preview.deliverable_recipient_count,
+            "skipped_registration_count": preview.skipped_registration_count,
+            "eligible": preview.deliverable_recipient_count > 0,
+            "reason": preview.reason,
+        }
+    )
+
+
+@router.post("/events/{event_id}/confirmation-email/resend")
+async def resend_event_confirmation_emails(
+    event_id: UUID,
+    body: ConfirmationResendBody,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(require_permission("notification")),
+):
+    await require_event_access(db, admin, event_id, "registration-read")
+    try:
+        outcome = await admin_confirmation_resend.execute_event_resend_confirmation(
+            db,
+            event_id=event_id,
+            admin_user_id=admin.id,
+            client_request_id=body.client_request_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+
+    if outcome.delivered_count == 0 and outcome.failed_count > 0:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "message": "No confirmation emails were delivered for this event.",
+                "delivered_count": outcome.delivered_count,
+                "failed_count": outcome.failed_count,
+            },
+        )
+    return _success(
+        {
+            "idempotent_replay": outcome.idempotent_replay,
+            "event_id": outcome.event_id,
+            "event_name": outcome.event_name,
+            "registrations_processed": outcome.registrations_processed,
+            "delivered_count": outcome.delivered_count,
+            "failed_count": outcome.failed_count,
+        }
+    )
+
+
+@router.get("/registrations/{registration_id}/confirmation-email/preview")
+async def preview_confirmation_email_resend(
+    registration_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(require_permission("notification", "registration-read")),
+):
+    try:
+        preview = await admin_confirmation_resend.preview_resend_confirmation(db, registration_id)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc))
+    detail = await ops.get_admin_registration_detail(db, registration_id)
+    await require_event_access(db, admin, detail["event_id"], "registration-read")
+    return _success(_resend_preview_out(preview))
+
+
+@router.post("/registrations/{registration_id}/confirmation-email/resend")
+async def resend_confirmation_email(
+    registration_id: UUID,
+    body: ConfirmationResendBody,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(require_permission("notification")),
+):
+    detail = await ops.get_admin_registration_detail(db, registration_id)
+    await require_event_access(db, admin, detail["event_id"], "registration-read")
+    try:
+        outcome = await admin_confirmation_resend.execute_resend_confirmation(
+            db,
+            registration_id=registration_id,
+            admin_user_id=admin.id,
+            client_request_id=body.client_request_id,
+            scope=body.scope,  # type: ignore[arg-type]
+            team_member_id=body.team_member_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+
+    if outcome.delivered_count == 0 and outcome.failed_count > 0:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "message": "Confirmation email could not be delivered.",
+                "outcome": _resend_outcome_out(outcome),
+            },
+        )
+    return _success(_resend_outcome_out(outcome))
 
 
 @router.get("/registrations/{registration_id}/recover-captured-payment/preview")
