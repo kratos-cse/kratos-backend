@@ -2,6 +2,7 @@
 Teams module (§5–§6). Async SQLAlchemy + real auth profile identity.
 Roster: mandatory members + optional substitutes (backend-enforced).
 """
+import logging
 import secrets
 import uuid
 from datetime import datetime, timezone
@@ -17,6 +18,11 @@ from sqlalchemy.orm import selectinload
 from app.core.errors import (
     ALREADY_REGISTERED,
     LEADER_ENTRY_NOT_ALLOWED,
+    MSG_ALREADY_ON_TEAM_FOR_EVENT,
+    MSG_DUPLICATE_PHONE_ON_EVENT,
+    MSG_MANDATORY_ROSTER_FULL,
+    MSG_SUBSTITUTE_SLOTS_FULL,
+    MSG_TEAM_ROSTER_FULL,
     ROSTER_INVALID,
     TEAM_FULL,
     TEAM_MANDATORY_FULL,
@@ -52,11 +58,14 @@ from app.services.roster_service import (
     can_add_role,
     count_mandatory,
     count_substitutes,
+    ensure_substitute_role_allowed,
     get_roster_style,
     mandatory_met,
     next_join_role,
     roster_limits,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _public_substitute_count(rules: EventRegistrationRule, max_subs: int) -> int:
@@ -399,7 +408,7 @@ async def join_via_invitation(
     members = await _load_members_with_profiles(db, team.id)
     active = _active_members(members)
     if len(active) >= total:
-        raise AppError(TEAM_FULL, "Team is full", status_code=409)
+        raise AppError(TEAM_FULL, MSG_TEAM_ROSTER_FULL, status_code=409)
 
     reg_result = await db.execute(
         select(Registration).where(Registration.team_id == team.id)
@@ -411,7 +420,7 @@ async def join_via_invitation(
     try:
         role = next_join_role(active, rules)
     except ValueError:
-        raise AppError(TEAM_FULL, "Team roster is full", status_code=409)
+        raise AppError(TEAM_FULL, MSG_TEAM_ROSTER_FULL, status_code=409)
 
     field_pairs = await validate_and_prepare_responses(
         db,
@@ -439,7 +448,7 @@ async def join_via_invitation(
     active = _active_members(members)
     if len(active) > total:
         await db.rollback()
-        raise AppError(TEAM_FULL, "Team is full", status_code=409)
+        raise AppError(TEAM_FULL, MSG_TEAM_ROSTER_FULL, status_code=409)
 
     await qr_service.generate_for_team_member(db, member.id)
 
@@ -513,18 +522,19 @@ async def add_roster_member(
 
     rules = await _get_rules_or_404(db, team.event_id)
     role = payload.role
+    ensure_substitute_role_allowed(rules, role)
 
     members = await _load_members_with_profiles(db, team.id)
     active = _active_members(members)
     required, max_subs, total = roster_limits(rules)
 
     if len(active) >= total:
-        raise AppError(TEAM_FULL, "Team roster is full", status_code=409)
+        raise AppError(TEAM_FULL, MSG_TEAM_ROSTER_FULL, status_code=409)
 
     if not can_add_role(active, rules, role):
         if role == TeamMemberRole.SUBSTITUTE:
-            raise AppError(TEAM_SUBSTITUTE_LIMIT, "No substitute slots remaining", status_code=409)
-        raise AppError(TEAM_MANDATORY_FULL, "Mandatory roster is already full", status_code=409)
+            raise AppError(TEAM_SUBSTITUTE_LIMIT, MSG_SUBSTITUTE_SLOTS_FULL, status_code=409)
+        raise AppError(TEAM_MANDATORY_FULL, MSG_MANDATORY_ROSTER_FULL, status_code=409)
 
     entry_source = TeamMemberEntrySource.LEADER_ENTERED
     member_profile: Profile | None = None
@@ -543,7 +553,7 @@ async def add_roster_member(
             )
         )
         if existing.scalar_one_or_none():
-            raise AppError(ALREADY_REGISTERED, "That participant is already on a team for this event", status_code=409)
+            raise AppError(ALREADY_REGISTERED, MSG_ALREADY_ON_TEAM_FOR_EVENT, status_code=409)
     else:
         if not as_admin and rules.member_registration_mode != MemberRegistrationMode.LEADER_MANAGED:
             raise AppError(
@@ -562,7 +572,7 @@ async def add_roster_member(
             )
         )
         if existing_phone.scalar_one_or_none():
-            raise AppError(ALREADY_REGISTERED, "A participant with that phone number is already registered for this event", status_code=409)
+            raise AppError(ALREADY_REGISTERED, MSG_DUPLICATE_PHONE_ON_EVENT, status_code=409)
 
         existing_prof = await db.execute(
             select(TeamMember.id)
@@ -574,7 +584,7 @@ async def add_roster_member(
             )
         )
         if existing_prof.scalar_one_or_none():
-            raise AppError(ALREADY_REGISTERED, "A participant with that phone number is already registered for this event", status_code=409)
+            raise AppError(ALREADY_REGISTERED, MSG_DUPLICATE_PHONE_ON_EVENT, status_code=409)
 
     pending_member = TeamMember(
         team_id=team.id,
@@ -612,9 +622,10 @@ async def add_roster_member(
     over_mandatory = role in (TeamMemberRole.MEMBER, TeamMemberRole.LEADER) and count_mandatory(active) > required
     if over_total or over_subs or over_mandatory:
         await db.rollback()
+        ensure_substitute_role_allowed(rules, role)
         if role == TeamMemberRole.SUBSTITUTE:
-            raise AppError(TEAM_SUBSTITUTE_LIMIT, "No substitute slots remaining", status_code=409)
-        raise AppError(TEAM_MANDATORY_FULL, "Mandatory roster is already full", status_code=409)
+            raise AppError(TEAM_SUBSTITUTE_LIMIT, MSG_SUBSTITUTE_SLOTS_FULL, status_code=409)
+        raise AppError(TEAM_MANDATORY_FULL, MSG_MANDATORY_ROSTER_FULL, status_code=409)
 
     await qr_service.generate_for_team_member(db, member.id)
 
@@ -627,10 +638,11 @@ async def add_roster_member(
         await db.commit()
     except IntegrityError as exc:
         await db.rollback()
-        raise_duplicate_team_member(exc, "Could not add member - already registered")
+        raise_duplicate_team_member(exc, MSG_DUPLICATE_PHONE_ON_EVENT)
     except Exception:
         await db.rollback()
-        raise HTTPException(status.HTTP_409_CONFLICT, "Could not add roster member - please retry")
+        logger.exception("add_roster_member commit failed team_id=%s", team_id)
+        raise
 
     invalidate_spots_cache(team.event_id)
 
@@ -748,7 +760,7 @@ async def link_member_profile(
         )
     )
     if conflict.scalar_one_or_none():
-        raise AppError(ALREADY_REGISTERED, "That profile is already on a team for this event", status_code=409)
+        raise AppError(ALREADY_REGISTERED, MSG_ALREADY_ON_TEAM_FOR_EVENT, status_code=409)
 
     member.profile_id = profile.id
     member.entry_source = TeamMemberEntrySource.LINKED_ACCOUNT

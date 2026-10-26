@@ -2,7 +2,7 @@ import time
 import uuid
 
 from app.api.deps_admin import _admin_cache, invalidate_admin_cache
-from app.core.security import _profile_cache, _user_cache, invalidate_user_cache
+from app.core.security import invalidate_user_cache
 from app.services.admin_ops_service import _dashboard_cache, invalidate_dashboard_cache
 from app.services.event_service import _spots_cache, invalidate_spots_cache
 
@@ -14,13 +14,10 @@ def test_admin_cache_invalidation():
     assert uid not in _admin_cache
 
 
-def test_user_profile_cache_invalidation():
-    uid = uuid.uuid4()
-    _user_cache[uid] = (time.monotonic() + 20.0, "u")
-    _profile_cache[uid] = (time.monotonic() + 20.0, "p")
-    invalidate_user_cache(uid)
-    assert uid not in _user_cache
-    assert uid not in _profile_cache
+def test_user_profile_cache_invalidation_is_noop_safe():
+    """ORM auth cache removed; invalidate_user_cache remains callable for profile PATCH."""
+    invalidate_user_cache(uuid.uuid4())
+    invalidate_user_cache(None)
 
 
 def test_dashboard_cache_invalidation():

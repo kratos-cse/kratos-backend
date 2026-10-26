@@ -1,14 +1,14 @@
 """Regression tests for production bugs (nullable profile_id, profile PATCH, create-order)."""
-import time
 import uuid
 from datetime import datetime, timezone
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
-from app.api.v1.endpoints.profile import update_my_profile
-from app.core.security import _profile_cache, invalidate_user_cache
+from app.core.security import create_access_token, invalidate_user_cache
+from app.main import app
 from app.models.enums import (
     MemberRegistrationMode,
     PaymentStatus,
@@ -21,7 +21,6 @@ from app.models.enums import (
 from app.models.event import EventRegistrationRule
 from app.models.registration import Registration
 from app.models.team import Team, TeamMember
-from app.schemas.profile import ProfileUpdateRequest
 from app.schemas.registration import RegistrationOut
 from app.schemas.team import TeamMemberOut
 from app.services.registration_service import get_registration_or_404, list_my_registrations
@@ -110,16 +109,24 @@ async def test_list_my_registrations_serializes_leader_entered_members(db):
 
 
 @pytest.mark.asyncio
-async def test_profile_update_with_cached_detached_profile(db):
+async def test_profile_patch_visible_on_next_auth_me(db):
     profile = await _make_user_profile(db, email=f"patch-{uuid.uuid4().hex}@reg.test")
-    _profile_cache[profile.user_id] = (time.monotonic() + 60.0, profile)
+    await db.commit()
 
-    updated = await update_my_profile(
-        ProfileUpdateRequest(college_name="Regression College"),
-        db=db,
-        profile=profile,
+    token, _ = create_access_token(profile.user_id)
+    headers = {"Authorization": f"Bearer {token}"}
+    client = TestClient(app)
+
+    r1 = client.patch(
+        "/api/v1/users/me/profile",
+        json={"college_name": "Regression College"},
+        headers=headers,
     )
-    assert updated.college_name == "Regression College"
+    assert r1.status_code == 200, r1.text
+
+    r2 = client.get("/api/v1/auth/me", headers=headers)
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["profile"]["college_name"] == "Regression College"
     invalidate_user_cache(profile.user_id)
 
 

@@ -4,7 +4,20 @@ import uuid
 import pytest
 from sqlalchemy import select
 
-from app.core.errors import MISSING_REQUIRED_FIELD, TEAM_FULL, AppError
+from unittest.mock import AsyncMock, patch
+
+from app.core.errors import (
+    ALREADY_REGISTERED,
+    MISSING_REQUIRED_FIELD,
+    MSG_DUPLICATE_PHONE_ON_EVENT,
+    MSG_ROSTER_INVALID_SUBSTITUTE,
+    MSG_SUBSTITUTE_SLOTS_FULL,
+    MSG_TEAM_ROSTER_FULL,
+    ROSTER_INVALID,
+    TEAM_FULL,
+    TEAM_SUBSTITUTE_LIMIT,
+    AppError,
+)
 from app.models.enums import (
     MemberRegistrationMode,
     RegistrationFieldScope,
@@ -112,7 +125,126 @@ async def test_add_roster_fills_mandatory_then_substitute_then_rejects(db):
             leader,
             _member_payload(full_name="Too Many", phone="93000000001"),
         )
-    assert exc.value.code in (TEAM_FULL, "TEAM_FULL")
+    assert exc.value.code == TEAM_FULL
+    assert exc.value.message == MSG_TEAM_ROSTER_FULL
+
+
+@pytest.mark.asyncio
+async def test_add_roster_substitute_before_mandatory_met_returns_substitute_limit(db):
+    """MEMBERS_SUBSTITUTES: substitute role is rejected until mandatory count is met."""
+    leader, team, _event, _rules = await _leader_managed_paid_team(db, required=5, substitutes=2)
+    with pytest.raises(AppError) as exc:
+        await team_service.add_roster_member(
+            db,
+            team.id,
+            leader,
+            RosterAddRequest(
+                role=TeamMemberRole.SUBSTITUTE,
+                full_name="Sub Too Early",
+                phone="91100000001",
+            ),
+        )
+    assert exc.value.code == TEAM_SUBSTITUTE_LIMIT
+    assert exc.value.message == MSG_SUBSTITUTE_SLOTS_FULL
+
+
+@pytest.mark.asyncio
+async def test_range_substitute_rejected_before_mandatory_filled(db):
+    leader = await _make_user_profile(db, email=f"range-sub-{uuid.uuid4().hex}@t.local")
+    event = await _make_event(db, name=f"RangeSub {uuid.uuid4().hex[:6]}", team=True)
+    rules = (
+        await db.execute(select(EventRegistrationRule).where(EventRegistrationRule.event_id == event.id))
+    ).scalar_one()
+    rules.member_registration_mode = MemberRegistrationMode.LEADER_MANAGED
+    rules.registration_mode = RegistrationMode.TEAM_ONLY
+    apply_roster_to_rules(rules, roster_style_value="RANGE", team_min_size=3, team_max_size=4)
+    await db.flush()
+
+    team, _registration = await _make_team_registration(db, event=event, leader=leader)
+    team.status = TeamStatus.PAID
+
+    with pytest.raises(AppError) as exc:
+        await team_service.add_roster_member(
+            db,
+            team.id,
+            leader,
+            RosterAddRequest(
+                role=TeamMemberRole.SUBSTITUTE,
+                full_name="Wrong Role",
+                phone="97000000001",
+            ),
+        )
+    assert exc.value.code == ROSTER_INVALID
+    assert exc.value.message == MSG_ROSTER_INVALID_SUBSTITUTE
+
+
+@pytest.mark.asyncio
+async def test_range_substitute_rejected_when_optional_slot_open(db):
+    leader = await _make_user_profile(db, email=f"range-sub2-{uuid.uuid4().hex}@t.local")
+    event = await _make_event(db, name=f"RangeSub2 {uuid.uuid4().hex[:6]}", team=True)
+    rules = (
+        await db.execute(select(EventRegistrationRule).where(EventRegistrationRule.event_id == event.id))
+    ).scalar_one()
+    rules.member_registration_mode = MemberRegistrationMode.LEADER_MANAGED
+    rules.registration_mode = RegistrationMode.TEAM_ONLY
+    apply_roster_to_rules(rules, roster_style_value="RANGE", team_min_size=3, team_max_size=4)
+    await db.flush()
+
+    team, _registration = await _make_team_registration(db, event=event, leader=leader)
+    team.status = TeamStatus.PAID
+    for i in range(2):
+        await team_service.add_roster_member(
+            db,
+            team.id,
+            leader,
+            _member_payload(full_name=f"M{i}", phone=f"971000000{i:02d}"),
+        )
+
+    with pytest.raises(AppError) as exc:
+        await team_service.add_roster_member(
+            db,
+            team.id,
+            leader,
+            RosterAddRequest(
+                role=TeamMemberRole.SUBSTITUTE,
+                full_name="Sub Not Allowed",
+                phone="97100000099",
+            ),
+        )
+    assert exc.value.code == ROSTER_INVALID
+    assert exc.value.message == MSG_ROSTER_INVALID_SUBSTITUTE
+
+
+@pytest.mark.asyncio
+async def test_add_roster_duplicate_phone_is_already_registered(db):
+    leader, team, _event, _rules = await _leader_managed_paid_team(db, required=3, substitutes=0)
+    phone = "98000000001"
+    await team_service.add_roster_member(
+        db,
+        team.id,
+        leader,
+        _member_payload(phone=phone, full_name="First"),
+    )
+    with pytest.raises(AppError) as exc:
+        await team_service.add_roster_member(
+            db,
+            team.id,
+            leader,
+            _member_payload(phone=phone, full_name="Duplicate"),
+        )
+    assert exc.value.code == ALREADY_REGISTERED
+    assert exc.value.message == MSG_DUPLICATE_PHONE_ON_EVENT
+
+
+@pytest.mark.asyncio
+async def test_add_roster_commit_failure_reraises_not_409(db):
+    leader, team, _event, _rules = await _leader_managed_paid_team(db, required=3, substitutes=0)
+    payload = _member_payload(phone="99000000001")
+
+    with patch.object(db, "commit", new_callable=AsyncMock) as mock_commit:
+        mock_commit.side_effect = RuntimeError("simulated commit failure")
+        with pytest.raises(RuntimeError, match="simulated commit failure"):
+            await team_service.add_roster_member(db, team.id, leader, payload)
 
 
 @pytest.mark.asyncio
@@ -160,7 +292,8 @@ async def test_range_min3_max4_allows_fourth_member_then_rejects_fifth(db):
             leader,
             _member_payload(full_name="TooMany", phone="96000000099"),
         )
-    assert exc.value.code in (TEAM_FULL, "TEAM_FULL")
+    assert exc.value.code == TEAM_FULL
+    assert exc.value.message == MSG_TEAM_ROSTER_FULL
 
 
 @pytest.mark.asyncio

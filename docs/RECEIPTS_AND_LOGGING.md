@@ -37,12 +37,13 @@ Branding assets live under `app/assets/kratos/` and are shared with transactiona
 - Business logs use module loggers (`payments.apply`, `receipt_service`, `notification_service`, etc.).
 - **Audit logs** (`audit_logs` table) remain the authoritative security/admin trail; application logs are for operations only.
 - Never log JWTs, Razorpay secrets, webhook signatures, or full payment payloads.
+- **Uvicorn access logs** redact sensitive query params (`receipt_token`, `access_token`, etc.) via `app/core/log_sanitize.py` (`install_sensitive_log_filters()` in `app/main.py`). Review historical log access if tokens were captured before deploy (~20 min receipt token TTL).
 
 ## Caching (process-local)
 
 | Cache | TTL | Invalidation |
 |-------|-----|--------------|
-| User / profile | 20s | `invalidate_user_cache()` on profile update |
+| User / profile | — | Not cached (ORM); `invalidate_user_cache()` kept for API compatibility on profile update |
 | Admin RBAC | 30s | `invalidate_admin_cache()` on role/admin changes |
 | Event list | 20s | `invalidate_events_list_cache()` on event mutations |
 | Spots remaining | 5s | `invalidate_spots_cache(event_id)` on registration/team/payment changes |

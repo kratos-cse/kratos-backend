@@ -38,6 +38,27 @@ MISSING_REQUIRED_FIELD = "MISSING_REQUIRED_FIELD"
 INVALID_FIELD_VALUE = "INVALID_FIELD_VALUE"
 UNKNOWN_FIELD = "UNKNOWN_FIELD"
 INTERNAL_ERROR = "INTERNAL_ERROR"
+CONFLICT = "CONFLICT"
+
+# Participant-facing roster copy (keep in sync with kratos-frontend lib/errors/userMessages.js)
+MSG_TEAM_ROSTER_FULL = (
+    "This team has reached its maximum size. You cannot add another participant."
+)
+MSG_ALREADY_ON_TEAM_FOR_EVENT = (
+    "That participant is already registered for this event on another team."
+)
+MSG_DUPLICATE_PHONE_ON_EVENT = (
+    "A participant with this phone number is already on a roster for this event."
+)
+MSG_SUBSTITUTE_SLOTS_FULL = "All substitute slots for this team are filled."
+MSG_MANDATORY_ROSTER_FULL = (
+    "This team already has the required number of members. "
+    "Add substitutes only if substitute slots remain."
+)
+MSG_ROSTER_INVALID_SUBSTITUTE = (
+    "This event uses regular member slots, not substitutes. "
+    "Add this participant as a member instead."
+)
 
 
 class AppError(Exception):
@@ -62,11 +83,17 @@ def http_code_from_detail(status_code: int, detail: str) -> str:
             return TEAM_NOT_FOUND
         return NOT_FOUND
     if status_code == 409:
-        if "full" in d:
+        if "maximum size" in d or ("team" in d and "full" in d) or "roster is full" in d:
             return TEAM_FULL
-        if "already" in d:
+        if "substitute slot" in d or ("substitute" in d and ("filled" in d or "remaining" in d)):
+            return TEAM_SUBSTITUTE_LIMIT
+        if "mandatory" in d and "full" in d:
+            return TEAM_MANDATORY_FULL
+        if "member slots" in d or "not substitutes" in d:
+            return ROSTER_INVALID
+        if "already" in d or "duplicate" in d:
             return ALREADY_REGISTERED
-        return ALREADY_REGISTERED
+        return CONFLICT
     if "not open" in d or "has not opened" in d:
         return REGISTRATION_NOT_OPEN
     if "has closed" in d or "registration has closed" in d:

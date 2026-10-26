@@ -2,11 +2,15 @@
 from types import SimpleNamespace
 
 from app.models.enums import TeamMemberRole, TeamMemberStatus
+import pytest
+
+from app.core.errors import MSG_ROSTER_INVALID_SUBSTITUTE, ROSTER_INVALID, AppError
 from app.services.roster_service import (
     apply_roster_to_rules,
     can_add_role,
     count_mandatory,
     count_substitutes,
+    ensure_substitute_role_allowed,
     mandatory_met,
     next_join_role,
     roster_limits,
@@ -35,6 +39,19 @@ def _rules(required=5, substitutes=2, team_min=None, team_max=None, roster_style
 
 def _member(role, status=TeamMemberStatus.ACTIVE):
     return SimpleNamespace(role=role, status=status)
+
+
+def test_ensure_substitute_role_rejected_for_range():
+    rules = _rules(3, 0, team_min=3, team_max=4, roster_style="RANGE")
+    with pytest.raises(AppError) as exc:
+        ensure_substitute_role_allowed(rules, TeamMemberRole.SUBSTITUTE)
+    assert exc.value.code == ROSTER_INVALID
+    assert exc.value.message == MSG_ROSTER_INVALID_SUBSTITUTE
+
+
+def test_ensure_substitute_role_allowed_for_members_subs():
+    rules = _rules(5, 2, roster_style="MEMBERS_SUBSTITUTES")
+    ensure_substitute_role_allowed(rules, TeamMemberRole.SUBSTITUTE)
 
 
 def test_roster_limits_5_plus_2():

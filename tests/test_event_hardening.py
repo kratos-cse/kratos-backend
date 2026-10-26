@@ -153,6 +153,7 @@ def test_whatsapp_route_registered():
 
 
 def test_http_exception_maps_already_registered():
-    from app.core.errors import ALREADY_REGISTERED, http_code_from_detail
+    from app.core.errors import ALREADY_REGISTERED, CONFLICT, http_code_from_detail
 
     assert http_code_from_detail(409, "You are already registered for this event") == ALREADY_REGISTERED
+    assert http_code_from_detail(409, "unexpected roster race") == CONFLICT

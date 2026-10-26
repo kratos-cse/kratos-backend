@@ -7,9 +7,12 @@ from fastapi.responses import JSONResponse
 from app.api.v1.router import api_router
 from app.core.config import settings
 from app.core.errors import INTERNAL_ERROR, AppError, http_code_from_detail
+from app.core.log_sanitize import install_sensitive_log_filters
 from app.core.middleware import RequestLoggingMiddleware
 
 logger = logging.getLogger(__name__)
+
+install_sensitive_log_filters()
 
 app = FastAPI(
     title="KRATOS'26 API",

@@ -5,6 +5,7 @@ required_member_count mirrors team_min_size; substitute_count = max - min for le
 """
 from __future__ import annotations
 
+from app.core.errors import MSG_ROSTER_INVALID_SUBSTITUTE, ROSTER_INVALID, AppError
 from app.models.enums import TeamMemberRole, TeamMemberStatus
 from app.models.event import EventRegistrationRule
 from app.models.team import TeamMember
@@ -173,6 +174,12 @@ def next_join_role(members: list[TeamMember], rules: EventRegistrationRule) -> T
     if active < team_max:
         return TeamMemberRole.MEMBER
     raise ValueError("roster_full")
+
+
+def ensure_substitute_role_allowed(rules: EventRegistrationRule, role: TeamMemberRole) -> None:
+    """FIXED and RANGE rosters use MEMBER for all non-leader slots — not SUBSTITUTE."""
+    if role == TeamMemberRole.SUBSTITUTE and get_roster_style(rules) != ROSTER_STYLE_MEMBERS_SUBSTITUTES:
+        raise AppError(ROSTER_INVALID, MSG_ROSTER_INVALID_SUBSTITUTE, status_code=409)
 
 
 def can_add_role(members: list[TeamMember], rules: EventRegistrationRule, role: TeamMemberRole) -> bool:
