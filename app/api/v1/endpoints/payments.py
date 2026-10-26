@@ -28,7 +28,8 @@ from app.payments.reconciliation import (
     trace_to_dict,
 )
 from app.payments.sync import sync_payment_from_razorpay
-from app.payments.razorpay_client import get_razorpay, with_retry_async
+from app.payments.webhook import handle_webhook_event
+from app.payments.razorpay_verify import find_verified_capture_for_payment
 from app.payments.admin_delete import admin_delete_payment
 from app.payments.refund import RefundError, refund_payment
 from app.payments.signatures import verify_checkout_signature, verify_webhook_signature
@@ -110,7 +111,19 @@ async def verify_payment(
         )
 
     applied = await apply_payment_success(db, payment.id, body.razorpay_payment_id)
-    return {"paymentId": str(payment.id), "applied": applied.applied, "status": "PAID"}
+    await db.refresh(payment)
+    registration_status = None
+    from app.payments.reconciliation import resolve_registration_for_payment
+
+    registration = await resolve_registration_for_payment(db, payment)
+    if registration is not None:
+        registration_status = registration.status.value
+    return {
+        "paymentId": str(payment.id),
+        "applied": applied.applied,
+        "status": payment.status.value,
+        "registrationStatus": registration_status,
+    }
 
 
 @router.post("/payments/webhook")
@@ -135,24 +148,7 @@ async def payments_webhook(request: Request, db: AsyncSession = Depends(get_db))
     except Exception:
         raise HTTPException(status_code=400, detail="Malformed JSON")
 
-    entity = (event.get("payload") or {}).get("payment", {}).get("entity", {})
-    order_id = entity.get("order_id")
-    if not order_id:
-        return {"received": True, "applied": False}
-
-    result = await db.execute(select(Payment).where(Payment.razorpay_order_id == order_id))
-    payment = result.scalar_one_or_none()
-    if not payment:
-        return {"received": True, "applied": False, "reason": "unknown order"}
-
-    if event.get("event") == "payment.captured":
-        applied = await apply_payment_success(db, payment.id, entity["id"])
-        return {"received": True, "applied": applied.applied}
-    if event.get("event") == "payment.failed":
-        applied = await apply_payment_failure(db, payment.id)
-        return {"received": True, "applied": applied.applied}
-
-    return {"received": True, "applied": False}
+    return await handle_webhook_event(db, event)
 
 
 @router.get("/payments/{payment_id}")
@@ -246,18 +242,16 @@ async def reconcile_payment(
         if admin_result.scalar_one_or_none() is None:
             raise HTTPException(status_code=403, detail="Not your payment")
 
+    verified = await find_verified_capture_for_payment(payment)
     razorpay_payment_id = body.razorpay_payment_id
-    if not razorpay_payment_id and settings.RAZORPAY_KEY_ID and settings.RAZORPAY_KEY_SECRET:
-        try:
-            order_payments = await with_retry_async(
-                lambda: get_razorpay().order.payments(payment.razorpay_order_id)
-            )
-            for item in order_payments.get("items", []):
-                if item.get("status") in ("captured", "authorized"):
-                    razorpay_payment_id = item["id"]
-                    break
-        except Exception:
-            logger.exception("reconcile_razorpay_fetch_failed payment_id=%s", payment.id)
+    if verified is not None:
+        razorpay_payment_id = verified.razorpay_payment_id
+    elif razorpay_payment_id:
+        from app.payments.razorpay_verify import verify_capture_by_payment_id
+
+        verified_hint = await verify_capture_by_payment_id(payment, razorpay_payment_id)
+        if verified_hint is not None:
+            razorpay_payment_id = verified_hint.razorpay_payment_id
 
     reconcile_result = await reconcile_local_payment_state(
         db, payment, razorpay_payment_id=razorpay_payment_id
@@ -278,6 +272,12 @@ async def reconcile_payment(
         raise AppError(
             PAYMENT_ORPHAN_CAPTURED,
             "Payment captured after registration was cancelled. Contact support for reconciliation.",
+            status_code=409,
+        )
+    if reconcile_result.outcome == ReconcileOutcome.DUPLICATE_CAPTURE:
+        raise AppError(
+            PAYMENT_ORPHAN_CAPTURED,
+            "Multiple captured payments were detected for this registration. Contact support for reconciliation.",
             status_code=409,
         )
     if reconcile_result.outcome in (ReconcileOutcome.AMBIGUOUS, ReconcileOutcome.NOT_CAPTURED):

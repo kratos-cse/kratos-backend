@@ -181,6 +181,13 @@ class AdminRegistrationListItem(BaseModel):
     created_at: datetime
 
 
+class AdminOfflinePaymentBody(BaseModel):
+    payment_method: str = Field(..., min_length=1, max_length=64)
+    payment_reference: str = Field(..., min_length=1, max_length=200)
+    amount_paise: Optional[int] = Field(default=None, ge=0)
+    currency: str = Field(default="INR", max_length=8)
+
+
 class RecoverCapturedPaymentBody(BaseModel):
     payment_id: uuid.UUID
 

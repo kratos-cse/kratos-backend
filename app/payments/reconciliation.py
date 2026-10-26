@@ -27,6 +27,7 @@ class ReconcileOutcome(str, Enum):
     REGISTRATION_CANCELLED = "REGISTRATION_CANCELLED"
     AMBIGUOUS = "AMBIGUOUS"
     NOT_CAPTURED = "NOT_CAPTURED"
+    DUPLICATE_CAPTURE = "DUPLICATE_CAPTURE"
 
 
 @dataclass
@@ -73,6 +74,31 @@ async def registration_linked_to_payment(db: AsyncSession, payment_id: UUID) -> 
     return result.scalar_one_or_none()
 
 
+async def resolve_registration_for_payment(db: AsyncSession, payment: Payment) -> Optional[Registration]:
+    """Durable registration association — never infer from payer identity alone."""
+    if payment.registration_id is not None:
+        result = await db.execute(
+            select(Registration).where(Registration.id == payment.registration_id)
+        )
+        registration = result.scalar_one_or_none()
+        if registration is not None:
+            return registration
+    return await registration_linked_to_payment(db, payment.id)
+
+
+async def other_paid_payment_for_registration(
+    db: AsyncSession, registration_id: UUID, exclude_payment_id: UUID
+) -> Optional[Payment]:
+    result = await db.execute(
+        select(Payment).where(
+            Payment.registration_id == registration_id,
+            Payment.id != exclude_payment_id,
+            Payment.status == PaymentStatus.PAID,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
 async def trace_payment(
     db: AsyncSession,
     *,
@@ -107,9 +133,9 @@ async def trace_payment(
             notes=["internal payment row not found"],
         )
 
-    registration = await registration_linked_to_payment(db, payment.id)
+    registration = await resolve_registration_for_payment(db, payment)
     if registration is None:
-        notes.append("no registration row with registration.payment_id pointing at this payment")
+        notes.append("no verifiable registration link (registration_id or registration.payment_id)")
     elif registration.status == RegistrationStatus.CANCELLED:
         notes.append("linked registration is CANCELLED (payment may be a late capture)")
 
@@ -177,12 +203,16 @@ async def reconcile_local_payment_state(
     """
     Apply idempotent post-payment effects when Razorpay has captured funds.
 
-    Does not guess registration ownership — only acts on registration.payment_id link.
+    Requires verified capture at Razorpay (not caller-supplied id alone).
     """
     from app.payments.apply import apply_payment_success
+    from app.payments.razorpay_verify import (
+        find_verified_capture_for_payment,
+        verify_capture_by_payment_id,
+    )
 
     trace = await trace_payment(db, payment_id=payment.id)
-    registration = await registration_linked_to_payment(db, payment.id)
+    registration = await resolve_registration_for_payment(db, payment)
 
     if registration is None:
         return ReconcileResult(
@@ -198,14 +228,28 @@ async def reconcile_local_payment_state(
             applied=False,
         )
 
-    effective_razorpay_id = razorpay_payment_id or payment.razorpay_payment_id
-    if payment.status != PaymentStatus.PAID and not effective_razorpay_id:
+    verified = None
+    if razorpay_payment_id:
+        verified = await verify_capture_by_payment_id(payment, razorpay_payment_id)
+    if verified is None:
+        verified = await find_verified_capture_for_payment(payment)
+    if verified is None:
         return ReconcileResult(outcome=ReconcileOutcome.NOT_CAPTURED, trace=trace, applied=False)
+
+    if payment.registration_id is not None:
+        sibling = await other_paid_payment_for_registration(db, payment.registration_id, payment.id)
+        if sibling is not None and payment.status != PaymentStatus.PAID:
+            trace.notes.append("another PAID payment exists for the same registration")
+            return ReconcileResult(
+                outcome=ReconcileOutcome.DUPLICATE_CAPTURE,
+                trace=trace,
+                applied=False,
+            )
 
     result = await apply_payment_success(
         db,
         payment.id,
-        effective_razorpay_id or "",
+        verified.razorpay_payment_id,
     )
     trace = await trace_payment(db, payment_id=payment.id)
     if result.applied:

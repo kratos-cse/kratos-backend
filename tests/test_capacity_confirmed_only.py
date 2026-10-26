@@ -156,7 +156,7 @@ async def test_confirm_fails_when_capacity_full(db):
     await db.flush()
 
     with pytest.raises(AppError) as exc:
-        await confirm_solo_registration(db, payment.id)
+        await confirm_solo_registration(db, registration)
     assert exc.value.code == CAPACITY_FULL
 
     reg = await refresh_registration(db, registration.id)

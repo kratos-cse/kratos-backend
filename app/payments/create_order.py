@@ -183,6 +183,7 @@ async def create_payment_order(
                     "notes": {
                         "payment_type": payment_type.value,
                         "event_id": str(event_id),
+                        "registration_id": str(registration.id),
                     },
                 }
             )
@@ -210,6 +211,7 @@ async def create_payment_order(
         payer_profile_id=payer.id,
         payment_type=payment_type,
         team_member_id=None,
+        registration_id=registration.id,
         razorpay_order_id=order["id"],
         amount_paise=amount_paise,
         currency="INR",

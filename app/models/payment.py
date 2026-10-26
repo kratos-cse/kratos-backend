@@ -27,6 +27,9 @@ class Payment(Base):
     team_member_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("team_members.id"), nullable=True
     )
+    registration_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("registrations.id"), nullable=True
+    )
     razorpay_order_id: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     razorpay_payment_id: Mapped[Optional[str]] = mapped_column(String, unique=True, nullable=True)
     amount_paise: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -38,6 +41,14 @@ class Payment(Base):
     refund_amount_paise: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     refunded_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     refund_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    provider_error_code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    provider_error_description: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    provider_error_source: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    provider_error_step: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    provider_payment_method: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    last_provider_event_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

@@ -161,8 +161,10 @@ async def test_team_payment_recovers_unlinked_pending_registration(db):
         payment_type=PaymentType.TEAM_REGISTRATION,
         registration=None,
     )
+    payment.registration_id = registration.id
+    await db.flush()
 
-    await confirm_team_registration(db, payment.id, leader.id)
+    await confirm_team_registration(db, registration, leader.id)
     await db.refresh(registration)
     await db.refresh(team)
 
@@ -174,15 +176,11 @@ async def test_team_payment_recovers_unlinked_pending_registration(db):
 @pytest.mark.asyncio
 async def test_team_payment_rejects_orphan_without_pending_registration(db):
     leader = await _make_user_profile(db, email=f"orphan-{uuid.uuid4().hex}@test.local")
-    payment = await _make_payment(
-        db,
-        payer=leader,
-        payment_type=PaymentType.TEAM_REGISTRATION,
-        registration=None,
-    )
+    event = await _make_event(db, name=f"Orphan {uuid.uuid4().hex[:6]}")
+    registration = await _make_solo_registration(db, event=event, profile=leader)
 
-    with pytest.raises(RuntimeError, match="no team registration linked"):
-        await confirm_team_registration(db, payment.id, leader.id)
+    with pytest.raises(RuntimeError, match="not a team registration"):
+        await confirm_team_registration(db, registration, leader.id)
 
 
 @pytest.mark.asyncio

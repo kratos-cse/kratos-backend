@@ -41,10 +41,12 @@ from app.schemas.admin_ops import (
     AdminRegistrationRulesUpdate,
     AdminRegistrationUpdate,
     AdminTeamUpdate,
+    AdminOfflinePaymentBody,
     RecoverCapturedPaymentBody,
     RecoverCapturedPaymentResult,
     TransferLeadershipBody,
 )
+from app.payments.admin_offline import confirm_offline_payment_for_registration
 from app.schemas.team import RosterAddRequest
 from app.payments.admin_recover import PaymentRecoveryError, preview_recover_captured_payment, recover_captured_payment
 from app.schemas.event_assignment import EventAssignmentCreate
@@ -495,8 +497,8 @@ async def update_participant(
 async def manual_register_participant(
     body: AdminManualRegister,
     db: AsyncSession = Depends(get_db),
-    _: AdminUser = Depends(require_mutation_admin),
-    __: AdminUser = Depends(require_permission("participant-registration", "participant-edit")),
+    admin: AdminUser = Depends(require_mutation_admin),
+    _: AdminUser = Depends(require_permission("participant-registration", "participant-edit")),
 ):
     profile_result = await db.execute(select(Profile).where(Profile.id == body.profile_id))
     if not profile_result.scalar_one_or_none():
@@ -507,15 +509,33 @@ async def manual_register_participant(
     if await _already_registered(db, body.event_id, body.profile_id):
         raise HTTPException(status_code=409, detail="Profile is already registered for this event.")
 
-    reg_status = (
-        RegistrationStatus.CONFIRMED if body.mark_paid else RegistrationStatus.PENDING
-    )
     registration = Registration(
         event_id=body.event_id,
         profile_id=body.profile_id,
-        status=reg_status,
+        status=RegistrationStatus.PENDING,
     )
     db.add(registration)
+    await db.flush()
+
+    if body.mark_paid:
+        result = await confirm_offline_payment_for_registration(
+            db,
+            admin,
+            registration_id=registration.id,
+            payment_method="ADMIN_MANUAL",
+            payment_reference=f"manual_register:{registration.id}",
+        )
+        return _success(
+            {
+                "registration_id": result.registration_id,
+                "event_id": registration.event_id,
+                "profile_id": registration.profile_id,
+                "status": result.registration_status.value,
+                "payment_id": str(result.payment_id),
+                "fulfillment": result.fulfillment,
+            }
+        )
+
     await db.commit()
     await db.refresh(registration)
     from app.services.google_sheets_triggers import trigger_registration_sheet_sync
@@ -748,6 +768,39 @@ async def preview_recover_captured_payment_admin(
     )
 
 
+@router.post("/registrations/{registration_id}/confirm-offline-payment")
+async def confirm_offline_payment_admin(
+    registration_id: UUID,
+    body: AdminOfflinePaymentBody,
+    db: AsyncSession = Depends(get_db),
+    _: AdminUser = Depends(require_mutation_admin),
+    admin: AdminUser = Depends(require_permission("registration-edit")),
+):
+    result = await db.execute(select(Registration).where(Registration.id == registration_id))
+    registration = result.scalar_one_or_none()
+    if not registration:
+        raise HTTPException(status_code=404, detail="Registration not found.")
+    await require_event_access(db, admin, registration.event_id, "registration-edit", write=True)
+    outcome = await confirm_offline_payment_for_registration(
+        db,
+        admin,
+        registration_id=registration_id,
+        amount_paise=body.amount_paise,
+        payment_method=body.payment_method,
+        payment_reference=body.payment_reference,
+        currency=body.currency,
+    )
+    return _success(
+        {
+            "registration_id": outcome.registration_id,
+            "payment_id": outcome.payment_id,
+            "registration_status": outcome.registration_status.value,
+            "payment_status": outcome.payment_status.value,
+            "fulfillment": outcome.fulfillment,
+        }
+    )
+
+
 @router.post("/registrations/{registration_id}/recover-captured-payment")
 async def recover_captured_payment_admin(
     registration_id: UUID,
@@ -795,6 +848,18 @@ async def patch_registration(
             and registration.status == RegistrationStatus.CONFIRMED
         ):
             return _success(await ops.revoke_registration_confirmation_admin(db, registration_id))
+        if (
+            body.status == RegistrationStatus.CONFIRMED
+            and registration.status != RegistrationStatus.CONFIRMED
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Cannot set CONFIRMED via PATCH. Use POST "
+                    "/admin/registrations/{id}/confirm-offline-payment for manual payments, or "
+                    "/admin/registrations/{id}/recover-captured-payment for verified Razorpay captures."
+                ),
+            )
         registration.status = body.status
     await db.commit()
     await db.refresh(registration)

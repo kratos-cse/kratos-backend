@@ -181,6 +181,7 @@ async def _make_payment(
     db.add(payment)
     await db.flush()
     if registration is not None:
+        payment.registration_id = registration.id
         registration.payment_id = payment.id
         await db.flush()
     return payment

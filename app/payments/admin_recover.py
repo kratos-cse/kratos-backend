@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
 from uuid import UUID
@@ -19,8 +20,9 @@ from app.models.receipt import Receipt
 from app.models.registration import Registration
 from app.models.enums import TeamMemberStatus
 from app.models.team import TeamMember
+from app.payments.admin_offline import assert_recoverable_razorpay_payment
 from app.payments.apply import apply_payment_success
-from app.payments.razorpay_client import get_razorpay, with_retry_async
+from app.payments.razorpay_verify import find_verified_capture_for_payment
 from app.payments.reconciliation import log_payment_reconciliation
 from app.services import audit_service
 
@@ -96,13 +98,9 @@ async def _load_payment(db: AsyncSession, payment_id: UUID) -> Payment:
 async def _assert_payment_registration_link(
     db: AsyncSession, registration: Registration, payment: Payment
 ) -> None:
-    if registration.payment_id is None:
-        raise PaymentRecoveryError(
-            "Payment is not linked to this registration (registration.payment_id is empty).",
-            status_code=409,
-            code="PAYMENT_REGISTRATION_UNLINKED",
-        )
-    if registration.payment_id != payment.id:
+    linked_by_pointer = registration.payment_id == payment.id
+    linked_by_attempt = payment.registration_id == registration.id
+    if not linked_by_pointer and not linked_by_attempt:
         raise PaymentRecoveryError(
             "Payment does not belong to the selected registration.",
             status_code=409,
@@ -146,16 +144,27 @@ def _assert_payer_matches_registration(registration: Registration, payment: Paym
         )
 
 
-async def fetch_razorpay_capture_for_order(razorpay_order_id: str) -> Optional[RazorpayCaptureInfo]:
-    order_payments = await with_retry_async(lambda: get_razorpay().order.payments(razorpay_order_id))
-    for item in order_payments.get("items", []):
-        if item.get("status") in ("captured", "authorized"):
-            return RazorpayCaptureInfo(
-                razorpay_payment_id=str(item["id"]),
-                amount_paise=int(item.get("amount", 0)),
-                status=str(item.get("status")),
-            )
-    return None
+async def fetch_razorpay_capture_for_order(
+    razorpay_order_id: str, *, amount_paise: int, currency: str = "INR"
+) -> Optional[RazorpayCaptureInfo]:
+    from app.models.payment import Payment
+
+    probe = Payment(
+        payer_profile_id=uuid.uuid4(),
+        payment_type=PaymentType.SOLO_REGISTRATION,
+        razorpay_order_id=razorpay_order_id,
+        amount_paise=amount_paise,
+        currency=currency,
+        status=PaymentStatus.CREATED,
+    )
+    verified = await find_verified_capture_for_payment(probe)
+    if verified is None:
+        return None
+    return RazorpayCaptureInfo(
+        razorpay_payment_id=verified.razorpay_payment_id,
+        amount_paise=verified.amount_paise,
+        status=verified.status,
+    )
 
 
 async def _load_registration_read(db: AsyncSession, registration_id: UUID) -> Registration:
@@ -216,7 +225,11 @@ async def preview_recover_captured_payment(
     capture_status: Optional[str] = None
     if payment.razorpay_order_id and eligible:
         try:
-            capture = await fetch_razorpay_capture_for_order(payment.razorpay_order_id)
+            capture = await fetch_razorpay_capture_for_order(
+                payment.razorpay_order_id,
+                amount_paise=payment.amount_paise,
+                currency=payment.currency,
+            )
             capture_status = capture.status if capture else "not_captured"
             if capture is None:
                 eligible = False
@@ -314,7 +327,17 @@ async def recover_captured_payment(
         if not payment.razorpay_order_id:
             raise PaymentRecoveryError("Payment has no Razorpay order id.", status_code=409)
 
-        capture = await fetch_razorpay_capture_for_order(payment.razorpay_order_id)
+        try:
+            assert_recoverable_razorpay_payment(payment)
+        except HTTPException as err:
+            detail = err.detail if isinstance(err.detail, str) else str(err.detail)
+            raise PaymentRecoveryError(detail, status_code=err.status_code) from err
+
+        capture = await fetch_razorpay_capture_for_order(
+            payment.razorpay_order_id,
+            amount_paise=payment.amount_paise,
+            currency=payment.currency,
+        )
         if capture is None:
             raise PaymentRecoveryError(
                 "Razorpay payment is not captured for this order.",
