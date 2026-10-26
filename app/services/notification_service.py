@@ -3,15 +3,9 @@ import asyncio
 import html
 import logging
 from datetime import datetime, timezone
-from email import encoders
-from email.message import EmailMessage
-from email.mime.image import MIMEImage
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from typing import Any, Optional, Sequence
 from uuid import UUID
 
-import aiosmtplib
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -69,6 +63,7 @@ def render_email_html(
     cta_url: Optional[str] = None,
     cta_label: Optional[str] = None,
     footnote: Optional[str] = None,
+    extra_body_html: Optional[str] = None,
 ) -> str:
     """Branded multipart HTML body for KRATOS transactional mail."""
     paras = "".join(
@@ -118,6 +113,7 @@ def render_email_html(
           {paras}
           {detail_rows}
           {cta}
+          {extra_body_html or ""}
           {note}
     """
     return render_email_shell_html(
@@ -141,14 +137,6 @@ def _html_from_plain(body: str, subject: str) -> str:
     )
 
 
-def _mailjet_configured() -> bool:
-    return bool(
-        settings.MAILJET_API_KEY
-        and settings.MAILJET_SECRET_KEY
-        and settings.MAILJET_FROM_EMAIL
-    )
-
-
 async def _send_email(
     to_email: str,
     subject: str,
@@ -157,75 +145,15 @@ async def _send_email(
     html_body: Optional[str] = None,
     inline_images: Optional[Sequence[tuple[str, str, bytes]]] = None,
 ) -> tuple[bool, Optional[str]]:
-    """Prefer Mailjet when configured; otherwise fall back to SMTP."""
-    if _mailjet_configured():
-        from app.services.email_service import send_email
+    from app.services.email_service import send_email
 
-        return await send_email(
-            to_email=to_email,
-            subject=subject,
-            text_body=body,
-            html_body=html_body,
-            inline_images=inline_images,
-        )
-    return await _send_smtp(to_email, subject, body, html_body=html_body, inline_images=inline_images)
-
-
-async def _send_smtp(
-    to_email: str,
-    subject: str,
-    body: str,
-    *,
-    html_body: Optional[str] = None,
-    inline_images: Optional[Sequence[tuple[str, str, bytes]]] = None,
-) -> tuple[bool, Optional[str]]:
-    if not settings.SMTP_HOST or not settings.SMTP_FROM:
-        return False, "SMTP not configured (SMTP_HOST / SMTP_FROM missing)"
-
-    if inline_images:
-        message = MIMEMultipart("related")
-        message["From"] = settings.SMTP_FROM
-        message["To"] = to_email
-        message["Subject"] = subject
-        alt = MIMEMultipart("alternative")
-        alt.attach(MIMEText(body, "plain", "utf-8"))
-        if html_body:
-            alt.attach(MIMEText(html_body, "html", "utf-8"))
-        message.attach(alt)
-        for cid, mime, data in inline_images:
-            subtype = mime.split("/")[-1] if "/" in mime else "png"
-            img = MIMEImage(data, _subtype=subtype)
-            img.add_header("Content-ID", f"<{cid}>")
-            img.add_header("Content-Disposition", "inline", filename=f"{cid}.png")
-            encoders.encode_base64(img)
-            message.attach(img)
-    else:
-        message = EmailMessage()
-        message["From"] = settings.SMTP_FROM
-        message["To"] = to_email
-        message["Subject"] = subject
-        message.set_content(body)
-        if html_body:
-            message.add_alternative(html_body, subtype="html")
-
-    try:
-        await asyncio.wait_for(
-            aiosmtplib.send(
-                message,
-                hostname=settings.SMTP_HOST,
-                port=settings.SMTP_PORT,
-                username=settings.SMTP_USER or None,
-                password=settings.SMTP_PASSWORD or None,
-                start_tls=settings.SMTP_TLS,
-                timeout=10.0,
-            ),
-            timeout=15.0,
-        )
-        return True, None
-    except Exception as exc:
-        logger.exception("SMTP send failed to=%s subject=%s", to_email, subject)
-        err = str(exc).strip() or exc.__class__.__name__
-        return False, err
+    return await send_email(
+        to_email=to_email,
+        subject=subject,
+        text_body=body,
+        html_body=html_body,
+        inline_images=inline_images,
+    )
 
 
 async def _deliver_notification_bg(
@@ -579,33 +507,62 @@ async def _eligible_event_profile_ids(db: AsyncSession, event_id: UUID) -> set[U
     return profile_ids
 
 
+async def _load_event_for_email(db: AsyncSession, event_id: UUID) -> Event:
+    from sqlalchemy.orm import selectinload
+
+    result = await db.execute(
+        select(Event).options(selectinload(Event.rules)).where(Event.id == event_id)
+    )
+    event = result.scalar_one_or_none()
+    if not event:
+        raise ValueError("Event not found")
+    return event
+
+
+def _kind_for_template(template_id: str) -> NotificationKind:
+    if template_id == "event_reminder" or template_id == "submission_deadline_reminder":
+        return NotificationKind.REMINDER
+    return NotificationKind.ANNOUNCEMENT
+
+
+async def count_eligible_recipients(db: AsyncSession, event_id: UUID) -> int:
+    return len(await _eligible_event_profile_ids(db, event_id))
+
+
+async def campaign_exists(db: AsyncSession, client_request_id: str) -> bool:
+    if not client_request_id:
+        return False
+    result = await db.execute(
+        select(Notification.id)
+        .where(Notification.payload["client_request_id"].as_string() == client_request_id)
+        .limit(1)
+    )
+    return result.scalar_one_or_none() is not None
+
+
 async def send_announcement(
     db: AsyncSession,
     event_id: UUID,
     subject: str,
     body: str,
 ) -> list[Notification]:
-    profile_ids = await _eligible_event_profile_ids(db, event_id)
-    html_body = render_email_html(
-        title=subject,
-        greeting="Announcement from KRATOS'26",
-        paragraphs=[p for p in body.split("\n") if p.strip()],
-        cta_url=_app_url(),
-        cta_label="Open KRATOS",
+    from app.services.email_templates.catalog import TemplateInputs, render_template
+
+    event = await _load_event_for_email(db, event_id)
+    rendered = render_template(
+        "event_announcement",
+        event,
+        TemplateInputs(subject=subject, body=body),
     )
-    sent: list[Notification] = []
-    for pid in profile_ids:
-        n = await create_and_send(
-            db,
-            pid,
-            NotificationKind.ANNOUNCEMENT,
-            subject,
-            body,
-            payload={"event_id": str(event_id)},
-            html_body=html_body,
-        )
-        sent.append(n)
-    return sent
+    outcome = await send_template_campaign(
+        db,
+        event_id=event_id,
+        template_id="event_announcement",
+        rendered=rendered,
+        initiated_by_admin_id=None,
+        client_request_id=None,
+    )
+    return outcome["notifications"]
 
 
 async def send_reminder(
@@ -614,24 +571,141 @@ async def send_reminder(
     subject: str,
     body: str,
 ) -> list[Notification]:
-    profile_ids = await _eligible_event_profile_ids(db, event_id)
-    html_body = render_email_html(
-        title=subject,
-        greeting="Reminder from KRATOS'26",
-        paragraphs=[p for p in body.split("\n") if p.strip()],
-        cta_url=_app_url(),
-        cta_label="Open KRATOS",
+    from app.services.email_templates.catalog import TemplateInputs, render_template
+
+    event = await _load_event_for_email(db, event_id)
+    rendered = render_template(
+        "event_reminder",
+        event,
+        TemplateInputs(subject=subject, body=body),
     )
-    sent: list[Notification] = []
+    outcome = await send_template_campaign(
+        db,
+        event_id=event_id,
+        template_id="event_reminder",
+        rendered=rendered,
+        initiated_by_admin_id=None,
+        client_request_id=None,
+    )
+    return outcome["notifications"]
+
+
+async def send_template_campaign(
+    db: AsyncSession,
+    *,
+    event_id: UUID,
+    template_id: str,
+    rendered,
+    initiated_by_admin_id: Optional[UUID],
+    client_request_id: Optional[str],
+) -> dict[str, Any]:
+    from uuid import uuid4
+
+    from app.services.email_service import smtp_configuration_error
+    from app.services.email_templates.catalog import get_template
+
+    tpl = get_template(template_id)
+    if tpl.preview_only:
+        raise ValueError("This template cannot be sent as a bulk campaign.")
+    smtp_err = smtp_configuration_error()
+    if smtp_err:
+        raise ValueError(smtp_err)
+
+    if client_request_id and await campaign_exists(db, client_request_id):
+        raise ValueError("Duplicate campaign request (idempotency key already used).")
+
+    profile_ids = await _eligible_event_profile_ids(db, event_id)
+    campaign_id = str(uuid4())
+    kind = _kind_for_template(template_id)
+    notifications: list[Notification] = []
     for pid in profile_ids:
+        payload: dict[str, Any] = {
+            "event_id": str(event_id),
+            "template_id": template_id,
+            "campaign_id": campaign_id,
+        }
+        if initiated_by_admin_id:
+            payload["initiated_by_admin_id"] = str(initiated_by_admin_id)
+        if client_request_id:
+            payload["client_request_id"] = client_request_id
         n = await create_and_send(
             db,
             pid,
-            NotificationKind.REMINDER,
-            subject,
-            body,
-            payload={"event_id": str(event_id)},
-            html_body=html_body,
+            kind,
+            rendered.subject,
+            rendered.text_body,
+            payload=payload,
+            html_body=rendered.html_body,
         )
-        sent.append(n)
-    return sent
+        notifications.append(n)
+
+    sent = sum(1 for n in notifications if n.status != NotificationStatus.FAILED)
+    failed = len(notifications) - sent
+    return {
+        "campaign_id": campaign_id,
+        "attempted": len(notifications),
+        "sent": sent,
+        "failed": failed,
+        "notifications": notifications,
+    }
+
+
+async def send_test_template_email(
+    *,
+    to_email: str,
+    subject: str,
+    text_body: str,
+    html_body: str,
+) -> tuple[bool, Optional[str]]:
+    from app.services.email_service import send_email, smtp_configuration_error
+
+    err = smtp_configuration_error()
+    if err:
+        return False, err
+    return await send_email(
+        to_email=to_email.strip(),
+        subject=subject,
+        text_body=text_body,
+        html_body=html_body,
+    )
+
+
+async def list_recent_campaigns(
+    db: AsyncSession, *, event_id: Optional[UUID] = None, limit: int = 30
+) -> list[dict]:
+    result = await db.execute(
+        select(Notification)
+        .where(Notification.payload["campaign_id"].as_string().isnot(None))
+        .order_by(Notification.created_at.desc())
+        .limit(500)
+    )
+    campaigns: dict[str, dict] = {}
+    for n in result.scalars().all():
+        payload = n.payload or {}
+        cid = payload.get("campaign_id")
+        if not cid or payload.get("test"):
+            continue
+        ev = payload.get("event_id")
+        if event_id and ev != str(event_id):
+            continue
+        if cid not in campaigns:
+            campaigns[cid] = {
+                "campaign_id": cid,
+                "template_id": payload.get("template_id"),
+                "event_id": ev,
+                "created_at": n.created_at,
+                "attempted": 0,
+                "sent": 0,
+                "failed": 0,
+                "sample_errors": [],
+            }
+        row = campaigns[cid]
+        row["attempted"] += 1
+        if n.status == NotificationStatus.SENT:
+            row["sent"] += 1
+        elif n.status == NotificationStatus.FAILED:
+            row["failed"] += 1
+            if n.error and len(row["sample_errors"]) < 3:
+                row["sample_errors"].append(n.error[:200])
+    ordered = sorted(campaigns.values(), key=lambda r: r["created_at"], reverse=True)
+    return ordered[:limit]

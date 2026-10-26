@@ -1,7 +1,9 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from typing import Any, Optional
+
+from fastapi import APIRouter, Depends, Header, HTTPException, status
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +27,30 @@ class EventBroadcastRequest(BaseModel):
     event_id: uuid.UUID
     subject: str = Field(min_length=1, max_length=500)
     body: str = Field(min_length=1)
+
+
+class TemplatePreviewRequest(BaseModel):
+    event_id: uuid.UUID
+    template_id: str = Field(min_length=1, max_length=64)
+    fields: dict[str, Any] = Field(default_factory=dict)
+
+
+class RecipientPreviewRequest(BaseModel):
+    event_id: uuid.UUID
+
+
+class TestSendRequest(BaseModel):
+    event_id: uuid.UUID
+    template_id: str = Field(min_length=1, max_length=64)
+    to_email: EmailStr
+    fields: dict[str, Any] = Field(default_factory=dict)
+
+
+class CampaignSendRequest(BaseModel):
+    event_id: uuid.UUID
+    template_id: str = Field(min_length=1, max_length=64)
+    fields: dict[str, Any] = Field(default_factory=dict)
+    client_request_id: Optional[str] = Field(default=None, max_length=128)
 
 
 def _notification_out(n: Notification) -> dict:
@@ -99,3 +125,132 @@ async def admin_reminder(
         "status": "success",
         "data": {"sent_count": len(sent), "notifications": [_notification_out(n) for n in sent[:20]]},
     }
+
+
+@router.get("/admin/notifications/templates")
+async def list_email_templates(
+    _: AdminUser = Depends(require_permission("announcement", "reminder", "notification")),
+):
+    from app.services.email_templates import list_templates
+
+    return {"status": "success", "data": list_templates()}
+
+
+@router.post("/admin/notifications/preview")
+async def preview_email_template(
+    body: TemplatePreviewRequest,
+    db: AsyncSession = Depends(get_db),
+    _: AdminUser = Depends(require_permission("announcement", "reminder", "notification")),
+):
+    from app.services.email_templates import render_template, validate_template_inputs
+
+    try:
+        event = await notification_service._load_event_for_email(db, body.event_id)
+        inputs = validate_template_inputs(body.template_id, body.fields)
+        rendered = render_template(body.template_id, event, inputs)
+    except KeyError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown template")
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+
+    return {
+        "status": "success",
+        "data": {
+            "subject": rendered.subject,
+            "text_body": rendered.text_body,
+            "html_body": rendered.html_body,
+        },
+    }
+
+
+@router.post("/admin/notifications/recipient-preview")
+async def preview_recipient_count(
+    body: RecipientPreviewRequest,
+    db: AsyncSession = Depends(get_db),
+    _: AdminUser = Depends(require_permission("announcement", "reminder", "notification")),
+):
+    try:
+        count = await notification_service.count_eligible_recipients(db, body.event_id)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+    return {"status": "success", "data": {"recipient_count": count}}
+
+
+@router.post("/admin/notifications/test-send")
+async def test_send_email(
+    body: TestSendRequest,
+    db: AsyncSession = Depends(get_db),
+    _: AdminUser = Depends(require_permission("announcement", "reminder", "notification")),
+):
+    from app.services.email_templates import get_template, render_template, validate_template_inputs
+
+    tpl = get_template(body.template_id)
+    if tpl.preview_only:
+        pass
+    try:
+        event = await notification_service._load_event_for_email(db, body.event_id)
+        inputs = validate_template_inputs(body.template_id, body.fields)
+        rendered = render_template(body.template_id, event, inputs)
+    except KeyError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown template")
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+
+    ok, err = await notification_service.send_test_template_email(
+        to_email=str(body.to_email),
+        subject=f"[TEST] {rendered.subject}",
+        text_body=rendered.text_body,
+        html_body=rendered.html_body,
+    )
+    if not ok:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, err or "SMTP send failed")
+    return {"status": "success", "data": {"delivered": True}}
+
+
+@router.post("/admin/notifications/campaign")
+async def send_email_campaign(
+    body: CampaignSendRequest,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(require_permission("announcement", "reminder", "notification")),
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+):
+    from app.services.email_templates import render_template, validate_template_inputs
+
+    client_id = body.client_request_id or idempotency_key
+    try:
+        event = await notification_service._load_event_for_email(db, body.event_id)
+        inputs = validate_template_inputs(body.template_id, body.fields)
+        rendered = render_template(body.template_id, event, inputs)
+        outcome = await notification_service.send_template_campaign(
+            db,
+            event_id=body.event_id,
+            template_id=body.template_id,
+            rendered=rendered,
+            initiated_by_admin_id=admin.id,
+            client_request_id=client_id,
+        )
+    except KeyError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Unknown template")
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+
+    return {
+        "status": "success",
+        "data": {
+            "campaign_id": outcome["campaign_id"],
+            "attempted": outcome["attempted"],
+            "queued": outcome["sent"],
+            "failed_immediate": outcome["failed"],
+            "notifications": [_notification_out(n) for n in outcome["notifications"][:20]],
+        },
+    }
+
+
+@router.get("/admin/notifications/campaigns")
+async def list_email_campaigns(
+    event_id: Optional[uuid.UUID] = None,
+    db: AsyncSession = Depends(get_db),
+    _: AdminUser = Depends(require_permission("announcement", "reminder", "notification")),
+):
+    rows = await notification_service.list_recent_campaigns(db, event_id=event_id)
+    return {"status": "success", "data": rows}

@@ -31,6 +31,14 @@ from app.models.receipt import Receipt
 from app.models.registration import Registration
 from app.models.team import Team, TeamMember
 from app.services import notification_service
+from app.services.email_content import (
+    coordinator_contact_line,
+    event_category_label,
+    format_event_schedule,
+    payment_reference_lines,
+    sanitize_whatsapp_group_url,
+    whatsapp_cta_html,
+)
 from app.services.receipt_service import (
     generate_qr_png_bytes,
     receipt_html_url,
@@ -84,15 +92,6 @@ async def confirmation_was_sent(db: AsyncSession, dedupe_key: str) -> bool:
     return result.scalar_one_or_none() is not None
 
 
-def _format_event_datetime(event: Event) -> tuple[str, str]:
-    date_str = "—"
-    time_str = "—"
-    if event.starts_at:
-        date_str = event.starts_at.strftime("%d %b %Y")
-        time_str = event.starts_at.strftime("%I:%M %p")
-    return date_str, time_str
-
-
 def _participant_name(profile: Optional[Profile], member: Optional[TeamMember] = None) -> str:
     if profile and profile.full_name:
         return profile.full_name
@@ -140,11 +139,14 @@ def render_confirmation_email(
     role_label: Optional[str] = None,
     team_member_count: Optional[int] = None,
 ) -> ConfirmationEmailContent:
-    event_date, event_time = _format_event_datetime(event)
-    venue = event.venue or "Easwari Engineering College, Chennai, Tamil Nadu"
-    amount_line = _amount_inr(payment.amount_paise) if payment else "—"
-    payment_id_str = str(payment.id) if payment else "—"
+    event_date, event_time, event_end = format_event_schedule(event)
+    time_display = event_time
+    if event_end:
+        time_display = f"{event_time} – {event_end}"
     reg_type_display = "TEAM" if registration_type == "TEAM" else "SOLO"
+    whatsapp_url = sanitize_whatsapp_group_url(event.whatsapp_group_link)
+    category = event_category_label(event)
+    coord_line = coordinator_contact_line(event)
 
     subject = f"Registration confirmed — {event.name}"
 
@@ -156,39 +158,50 @@ def render_confirmation_email(
         "",
         "EVENT",
         f"  {event.name}",
-        f"  Date: {event_date}",
-        f"  Time: {event_time}",
-        f"  Venue: {venue}",
-        "",
-        "REGISTRATION",
-        f"  Registration ID: {registration_id}",
-        f"  Participant: {participant_name}",
-        f"  Type: {reg_type_display}",
     ]
+    if category:
+        text_lines.append(f"  Category: {category}")
+    text_lines.extend([f"  Date: {event_date}", f"  Time: {time_display}"])
+    if event.venue:
+        text_lines.append(f"  Venue: {event.venue}")
+    if event.short_desc:
+        text_lines.append(f"  Instructions: {event.short_desc.strip()}")
+    if coord_line:
+        text_lines.append(f"  Contact: {coord_line}")
+    text_lines.extend(
+        [
+            "",
+            "REGISTRATION",
+            f"  Registration ID: {registration_id}",
+            f"  Participant: {participant_name}",
+            f"  Type: {reg_type_display}",
+        ]
+    )
     if team_name:
         text_lines.extend([f"  Team: {team_name}", f"  Role: {role_label or 'Team Member'}"])
     if team_member_count is not None:
         text_lines.append(f"  Team size: {team_member_count}")
-    text_lines.extend(
-        [
-            "",
-            "PAYMENT",
-            f"  Payment ID: {payment_id_str}",
-            f"  Amount: {amount_line}",
-            "  Status: PAID",
-        ]
-    )
+
+    pay_rows = payment_reference_lines(payment)
+    if pay_rows:
+        text_lines.append("")
+        text_lines.append("PAYMENT")
+        for k, v in pay_rows:
+            text_lines.append(f"  {k}: {v}")
     if receipt_number:
         text_lines.append(f"  Receipt: {receipt_number}")
+
     text_lines.extend(
         [
             "",
             "YOUR ENTRY QR is attached to this email.",
             "Please present your personal QR at event check-in.",
             "",
-            f"Can't see the QR? Open your registration page: {registration_page_url}",
+            f"View my registration: {registration_page_url}",
         ]
     )
+    if whatsapp_url:
+        text_lines.extend(["", f"Join the Event WhatsApp Group: {whatsapp_url}"])
     if receipt_html:
         text_lines.extend(["", f"View receipt: {receipt_html}", f"Download receipt: {receipt_pdf}"])
     text_lines.extend(
@@ -204,11 +217,7 @@ def render_confirmation_email(
     )
     text_body = "\n".join(text_lines)
 
-    payment_rows = [
-        ("Payment ID", payment_id_str),
-        ("Amount", amount_line),
-        ("Status", "PAID"),
-    ]
+    payment_rows = list(pay_rows)
     if receipt_number:
         payment_rows.insert(0, ("Receipt number", receipt_number))
 
@@ -223,6 +232,18 @@ def render_confirmation_email(
         reg_rows.append(("Role", role_label))
     if team_member_count is not None:
         reg_rows.append(("Team members", str(team_member_count)))
+
+    event_rows: list[tuple[str, str]] = [("Event", event.name)]
+    if category:
+        event_rows.append(("Category", category))
+    event_rows.append(("Date", event_date))
+    event_rows.append(("Time", time_display))
+    if event.venue:
+        event_rows.append(("Venue", event.venue))
+    if event.short_desc:
+        event_rows.append(("Instructions", event.short_desc.strip()))
+    if coord_line:
+        event_rows.append(("Coordinator", coord_line))
 
     def _table(rows: list[tuple[str, str]]) -> str:
         cells = "".join(
@@ -261,18 +282,17 @@ def render_confirmation_email(
             <strong>{html.escape(event.name)}</strong> has been successfully confirmed.</p>
 
           <p style="margin:0 0 8px;font-size:12px;font-weight:700;letter-spacing:0.08em;color:#64748b;">EVENT</p>
-          {_table([
-              ("Event", event.name),
-              ("Date", event_date),
-              ("Time", event_time),
-              ("Venue", venue),
-          ])}
+          {_table(event_rows)}
 
           <p style="margin:0 0 8px;font-size:12px;font-weight:700;letter-spacing:0.08em;color:#64748b;">REGISTRATION</p>
           {_table(reg_rows)}
 
-          <p style="margin:0 0 8px;font-size:12px;font-weight:700;letter-spacing:0.08em;color:#64748b;">PAYMENT</p>
-          {_table(payment_rows)}
+          {f'<p style="margin:0 0 8px;font-size:12px;font-weight:700;letter-spacing:0.08em;color:#64748b;">PAYMENT</p>{_table(payment_rows)}' if payment_rows else ''}
+
+          <p style="margin:12px 0 16px;">
+            <a href="{html.escape(registration_page_url)}" style="display:inline-block;background:#0f172a;color:#f8fafc;
+            text-decoration:none;font-weight:600;font-size:13px;padding:10px 16px;border-radius:8px;">View My Registration</a>
+          </p>
 
           <p style="margin:20px 0 10px;font-size:13px;font-weight:700;color:#0f172a;">YOUR ENTRY QR</p>
           <p style="margin:0 0 12px;font-size:14px;color:#334155;">Present this personal QR at event check-in.</p>
@@ -286,6 +306,7 @@ def render_confirmation_email(
               Open your registration page</a> to view your pass.</p>
 
           {receipt_cta}
+          {whatsapp_cta_html(whatsapp_url) if whatsapp_url else ""}
 
           <p style="margin:24px 0 0;font-size:12px;line-height:1.55;color:#94a3b8;">
             Keep this email for event entry · Bring valid college ID · Arrive before the event starts.
@@ -497,56 +518,88 @@ async def send_team_payment_confirmations(db: AsyncSession, payment_id: UUID) ->
     receipt_number, _, _ = await _receipt_links(db, payment, payment.payer_profile_id)
 
     for member in members:
-        qr = (
-            await db.execute(
-                select(QRCode).where(
-                    QRCode.team_member_id == member.id,
-                    QRCode.is_active.is_(True),
-                )
+        try:
+            await _send_team_member_confirmation_email(
+                db,
+                payment_id=payment_id,
+                payment=payment,
+                event=event,
+                team=team,
+                registration=registration,
+                member=member,
+                active_count=active_count,
+                receipt_number=receipt_number,
             )
-        ).scalar_one_or_none()
-        if not qr:
-            logger.warning(
-                "team_confirmation_missing_qr payment_id=%s team_member_id=%s",
+        except Exception:
+            logger.exception(
+                "team_confirmation_member_failed payment_id=%s team_member_id=%s",
                 payment_id,
                 member.id,
             )
-            continue
 
-        to_email = await _resolve_team_member_email(db, member)
-        if not to_email:
-            continue
 
-        profile_id = member.profile_id or team.leader_profile_id
-        receipt_number_m, receipt_html, receipt_pdf = await _receipt_links(
-            db, payment, member.profile_id
+async def _send_team_member_confirmation_email(
+    db: AsyncSession,
+    *,
+    payment_id: UUID,
+    payment: Payment,
+    event: Event,
+    team: Team,
+    registration: Registration,
+    member: TeamMember,
+    active_count: int,
+    receipt_number: Optional[str],
+) -> None:
+    qr = (
+        await db.execute(
+            select(QRCode).where(
+                QRCode.team_member_id == member.id,
+                QRCode.is_active.is_(True),
+            )
         )
-        content = render_confirmation_email_with_qr(
-            qr_token=qr.token,
-            participant_name=_participant_name(member.profile, member),
-            event=event,
-            registration_type="TEAM",
-            registration_id=registration.id,
-            payment=payment,
-            receipt_number=receipt_number_m or receipt_number,
-            receipt_html=receipt_html,
-            receipt_pdf=receipt_pdf,
-            registration_page_url=_registration_page_url(registration.id),
-            team_name=team.name,
-            role_label=_role_label(member.role),
-            team_member_count=active_count,
+    ).scalar_one_or_none()
+    if not qr:
+        logger.warning(
+            "team_confirmation_missing_qr payment_id=%s team_member_id=%s",
+            payment_id,
+            member.id,
         )
-        await _send_one(
-            db,
-            dedupe_key=dedupe_key_team_member(payment_id, member.id),
-            profile_id=profile_id,
-            to_email=to_email,
-            content=content,
-            payment_id=payment_id,
-            registration_id=registration.id,
-            team_id=team.id,
-            team_member_id=member.id,
-        )
+        return
+
+    to_email = await _resolve_team_member_email(db, member)
+    if not to_email:
+        return
+
+    profile_id = member.profile_id or team.leader_profile_id
+    receipt_number_m, receipt_html, receipt_pdf = await _receipt_links(
+        db, payment, member.profile_id
+    )
+    content = render_confirmation_email_with_qr(
+        qr_token=qr.token,
+        participant_name=_participant_name(member.profile, member),
+        event=event,
+        registration_type="TEAM",
+        registration_id=registration.id,
+        payment=payment,
+        receipt_number=receipt_number_m or receipt_number,
+        receipt_html=receipt_html,
+        receipt_pdf=receipt_pdf,
+        registration_page_url=_registration_page_url(registration.id),
+        team_name=team.name,
+        role_label=_role_label(member.role),
+        team_member_count=active_count,
+    )
+    await _send_one(
+        db,
+        dedupe_key=dedupe_key_team_member(payment_id, member.id),
+        profile_id=profile_id,
+        to_email=to_email,
+        content=content,
+        payment_id=payment_id,
+        registration_id=registration.id,
+        team_id=team.id,
+        team_member_id=member.id,
+    )
 
 
 async def send_team_member_confirmation(

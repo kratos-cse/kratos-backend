@@ -49,4 +49,7 @@ class Registration(Base):
 
     event: Mapped["Event"] = relationship("Event")
     team: Mapped[Optional["Team"]] = relationship("Team")
-    payment: Mapped[Optional["Payment"]] = relationship("Payment")
+    payment: Mapped[Optional["Payment"]] = relationship(
+        "Payment",
+        foreign_keys=[payment_id],
+    )

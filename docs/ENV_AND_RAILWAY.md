@@ -198,7 +198,10 @@ Pick one provider and fill:
 | `SMTP_USER` | login / API user |
 | `SMTP_PASSWORD` | password or API key |
 | `SMTP_FROM` | From: address (must be allowed by provider) |
-| `SMTP_TLS` | `true` for STARTTLS on 587 |
+| `SMTP_TLS` | `true` for STARTTLS on port 587 (do not combine with `SMTP_SSL`) |
+| `SMTP_SSL` | `true` for implicit TLS on port 465 |
+
+Use **either** STARTTLS (`SMTP_TLS=true`, port 587) **or** implicit TLS (`SMTP_SSL=true`, port 465), not both.
 
 ### Gmail (dev)
 
