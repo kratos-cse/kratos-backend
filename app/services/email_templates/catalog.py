@@ -63,16 +63,13 @@ def _app_url() -> str:
 
 
 def _event_detail_rows(event: Event) -> list[tuple[str, str]]:
-    date_str, start_str, end_str = format_event_schedule(event)
+    date_str, slot_str = format_event_schedule(event)
     rows: list[tuple[str, str]] = [("Event", event.name)]
     cat = event_category_label(event)
     if cat:
         rows.append(("Category", cat))
     rows.append(("Date", date_str))
-    time_val = start_str
-    if end_str:
-        time_val = f"{start_str} – {end_str}"
-    rows.append(("Start time", time_val))
+    rows.append(("Slot", slot_str))
     if event.venue:
         rows.append(("Venue", event.venue))
     coord = coordinator_contact_line(event)
@@ -200,10 +197,9 @@ def _render_announcement(event: Event, inputs: TemplateInputs) -> RenderedTempla
 
 
 def _render_reminder(event: Event, inputs: TemplateInputs) -> RenderedTemplateEmail:
-    date_str, start_str, end_str = format_event_schedule(event)
+    date_str, slot_str = format_event_schedule(event)
     intro = [
-        f"This is a reminder for {event.name} on {date_str} at {start_str}."
-        + (f" The event ends around {end_str}." if end_str else "")
+        f"This is a reminder for {event.name} on {date_str} ({slot_str} slot)."
     ]
     if event.venue:
         intro.append(f"Venue: {event.venue}.")

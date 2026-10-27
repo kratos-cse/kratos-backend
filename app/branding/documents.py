@@ -16,6 +16,8 @@ BRAND_IMAGE_URLS = {
 
 _EMAIL_ASSETS = BRAND_IMAGE_URLS
 
+KRATOS_SUPPORT_EMAIL = "updates.kratos@gmail.com"
+
 
 def _asset_data_uri(filename: str, fallback_mime: str = "image/svg+xml") -> str | None:
     path = _ASSETS_DIR / filename
@@ -83,7 +85,7 @@ def render_email_shell_html(
     *,
     title: str,
     body_html: str,
-    footer_note: str = "KRATOS'26 · EEC · ACE · CSE · kratos.cse@gmail.com",
+    footer_note: str = f"KRATOS'26 · EEC · ACE · CSE · {KRATOS_SUPPORT_EMAIL}",
 ) -> str:
     """Wrap transactional email content in the shared KRATOS'26 shell."""
     partner_logos = "".join(

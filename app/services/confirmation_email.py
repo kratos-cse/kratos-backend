@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.branding.documents import render_email_shell_html
+from app.branding.documents import KRATOS_SUPPORT_EMAIL, render_email_shell_html
 from app.core.receipt_token import create_receipt_access_token
 from app.models.enums import (
     NotificationKind,
@@ -162,10 +162,7 @@ def render_confirmation_email(
     role_label: Optional[str] = None,
     team_member_count: Optional[int] = None,
 ) -> ConfirmationEmailContent:
-    event_date, event_time, event_end = format_event_schedule(event)
-    time_display = event_time
-    if event_end:
-        time_display = f"{event_time} – {event_end}"
+    event_date, event_slot = format_event_schedule(event)
     reg_type_display = "TEAM" if registration_type == "TEAM" else "SOLO"
     whatsapp_url = sanitize_whatsapp_group_url(event.whatsapp_group_link)
     category = event_category_label(event)
@@ -184,7 +181,7 @@ def render_confirmation_email(
     ]
     if category:
         text_lines.append(f"  Category: {category}")
-    text_lines.extend([f"  Date: {event_date}", f"  Time: {time_display}"])
+    text_lines.extend([f"  Date: {event_date}", f"  Slot: {event_slot}"])
     if event.venue:
         text_lines.append(f"  Venue: {event.venue}")
     if event.short_desc:
@@ -233,7 +230,7 @@ def render_confirmation_email(
             "IMPORTANT:",
             "- Keep this email for event entry.",
             "- Bring valid college ID.",
-            "- Arrive before the event start time.",
+            "- Arrive on time for your event slot.",
             "",
             "KRATOS'26 · Association of Computer Engineers · EEC · CSE",
         ]
@@ -260,7 +257,7 @@ def render_confirmation_email(
     if category:
         event_rows.append(("Category", category))
     event_rows.append(("Date", event_date))
-    event_rows.append(("Time", time_display))
+    event_rows.append(("Slot", event_slot))
     if event.venue:
         event_rows.append(("Venue", event.venue))
     if event.short_desc:
@@ -339,7 +336,7 @@ def render_confirmation_email(
     html_body = render_email_shell_html(
         title="Registration confirmed",
         body_html=body_html,
-        footer_note="KRATOS'26 · Easwari Engineering College · Chennai · kratos.cse@gmail.com",
+        footer_note=f"KRATOS'26 · Easwari Engineering College · Chennai · {KRATOS_SUPPORT_EMAIL}",
     )
 
     return ConfirmationEmailContent(

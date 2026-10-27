@@ -18,7 +18,8 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.branding.documents import BRAND_IMAGE_URLS
+from app.branding.documents import BRAND_IMAGE_URLS, KRATOS_SUPPORT_EMAIL
+from app.services.email_content import event_slot_display
 from app.core.config import settings
 
 logger = logging.getLogger("receipt_service")
@@ -190,7 +191,7 @@ def render_pdf_receipt(ctx: dict[str, Any]) -> bytes:
     c.drawCentredString(
         width / 2,
         card_top - card_h + 16,
-        "Thank you for registering for KRATOS'26 · kratos.cse@gmail.com",
+        f"Thank you for registering for KRATOS'26 · {KRATOS_SUPPORT_EMAIL}",
     )
 
     c.showPage()
@@ -272,11 +273,8 @@ async def get_receipt_data_context(db: AsyncSession, payment_id: uuid.UUID) -> d
     event_name = event.name
     event_category = event.category.value if hasattr(event.category, "value") else str(event.category)
     event_venue = event.venue or ""
-    if event.slot:
-        event_slot = event.slot
-    elif event.starts_at:
-        event_slot = event.starts_at.strftime("%B %d, %Y %I:%M %p")
-    else:
+    event_slot = event_slot_display(event)
+    if event_slot == "—":
         event_slot = ""
     whatsapp_link = event.whatsapp_group_link
 
@@ -583,7 +581,7 @@ def render_html_receipt(ctx: dict[str, Any]) -> str:
         <li>Check your email for your personal QR pass and event details.</li>
         <li>Arrive at least 30 minutes before the event start time.</li>
         <li>Bring a valid college ID for verification at the venue.</li>
-        <li>For support, contact <strong>kratos.cse@gmail.com</strong></li>
+        <li>For support, contact <strong>{html.escape(KRATOS_SUPPORT_EMAIL)}</strong></li>
       </ul>
     </div>
   </div>

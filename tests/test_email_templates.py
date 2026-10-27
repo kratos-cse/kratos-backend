@@ -24,7 +24,7 @@ def _sample_event(**kwargs) -> Event:
         whatsapp_group_link="https://chat.whatsapp.com/AbCdEfGh",
         short_desc="Bring your laptop and college ID.",
         coordinator="ACE Team",
-        coord_contact="kratos.cse@gmail.com",
+        coord_contact="updates.kratos@gmail.com",
         visibility=EventVisibility.PUBLISHED,
         registration_status=EventRegistrationStatus.OPEN,
     )

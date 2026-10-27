@@ -795,7 +795,7 @@ def _resend_outcome_out(outcome: admin_confirmation_resend.ResendOutcome) -> dic
 async def preview_event_confirmation_email_resend(
     event_id: UUID,
     db: AsyncSession = Depends(get_db),
-    admin: AdminUser = Depends(require_permission("notification", "registration-read")),
+    admin: AdminUser = Depends(require_permission("announcement", "notification", "registration-read")),
 ):
     await require_event_access(db, admin, event_id, "registration-read")
     try:
@@ -821,7 +821,7 @@ async def resend_event_confirmation_emails(
     event_id: UUID,
     body: ConfirmationResendBody,
     db: AsyncSession = Depends(get_db),
-    admin: AdminUser = Depends(require_permission("notification")),
+    admin: AdminUser = Depends(require_permission("announcement", "notification")),
 ):
     await require_event_access(db, admin, event_id, "registration-read")
     try:
@@ -859,7 +859,7 @@ async def resend_event_confirmation_emails(
 async def preview_confirmation_email_resend(
     registration_id: UUID,
     db: AsyncSession = Depends(get_db),
-    admin: AdminUser = Depends(require_permission("notification", "registration-read")),
+    admin: AdminUser = Depends(require_permission("announcement", "notification", "registration-read")),
 ):
     try:
         preview = await admin_confirmation_resend.preview_resend_confirmation(db, registration_id)
@@ -875,7 +875,7 @@ async def resend_confirmation_email(
     registration_id: UUID,
     body: ConfirmationResendBody,
     db: AsyncSession = Depends(get_db),
-    admin: AdminUser = Depends(require_permission("notification")),
+    admin: AdminUser = Depends(require_permission("announcement", "notification")),
 ):
     detail = await ops.get_admin_registration_detail(db, registration_id)
     await require_event_access(db, admin, detail["event_id"], "registration-read")

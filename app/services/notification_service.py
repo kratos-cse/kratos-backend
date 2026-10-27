@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.branding.documents import render_email_shell_html
+from app.branding.documents import KRATOS_SUPPORT_EMAIL, render_email_shell_html
 from app.core.config import settings
 from app.models.enums import (
     NotificationKind,
@@ -119,7 +119,10 @@ def render_email_html(
     return render_email_shell_html(
         title=title,
         body_html=body_html,
-        footer_note="Association of Computer Engineers · Department of CSE · Easwari Engineering College",
+        footer_note=(
+            "Association of Computer Engineers · Department of CSE · "
+            f"Easwari Engineering College · {KRATOS_SUPPORT_EMAIL}"
+        ),
     )
 
 

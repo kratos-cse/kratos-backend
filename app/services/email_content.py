@@ -46,17 +46,18 @@ def whatsapp_cta_html(url: str, *, label: str = "Join the Event WhatsApp Group")
     )
 
 
-def format_event_schedule(event: Event) -> tuple[str, str, Optional[str]]:
-    """Date, start time, optional end time string."""
-    date_str = "—"
-    start_str = "—"
-    end_str: Optional[str] = None
-    if event.starts_at:
-        date_str = event.starts_at.strftime("%d %b %Y")
-        start_str = event.starts_at.strftime("%I:%M %p").lstrip("0")
-    if event.ends_at:
-        end_str = event.ends_at.strftime("%I:%M %p").lstrip("0")
-    return date_str, start_str, end_str
+def event_slot_display(event: Event) -> str:
+    """Human-readable slot (Morning, Afternoon, …) — no clock times in email copy."""
+    if event.slot is None:
+        return "—"
+    val = event.slot.value if hasattr(event.slot, "value") else str(event.slot)
+    return val.replace("_", " ").title()
+
+
+def format_event_schedule(event: Event) -> tuple[str, str]:
+    """Event date and slot label for transactional/campaign email."""
+    date_str = event.starts_at.strftime("%d %b %Y") if event.starts_at else "—"
+    return date_str, event_slot_display(event)
 
 
 def event_category_label(event: Event) -> Optional[str]:
