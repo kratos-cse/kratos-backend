@@ -9,7 +9,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.attendance import AttendanceScan
+from app.models.attendance import AttendanceCheckpoint, AttendanceScan
 from app.models.enums import AttendanceScanResult, EventVisibility, TeamMemberRole, TeamMemberStatus
 from app.models.event import Event
 from app.models.profile import Profile
@@ -293,13 +293,31 @@ async def list_scanner_events(db: AsyncSession) -> list[dict]:
     return [{"id": row.id, "name": row.name} for row in rows]
 
 
-async def list_scanner_checkpoints(db: AsyncSession, event_id: uuid.UUID) -> list[dict]:
-    event = (await db.execute(select(Event).where(Event.id == event_id))).scalar_one_or_none()
-    if event is None or event.visibility != EventVisibility.PUBLISHED:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found.")
-    checkpoints = await attendance_service.list_checkpoints(db, event_id=event_id)
+async def list_scanner_checkpoints(db: AsyncSession, event_id: uuid.UUID | None = None) -> list[dict]:
+    """Active checkpoints for published events. Omit event_id to list every event."""
+    if event_id is not None:
+        event = (await db.execute(select(Event).where(Event.id == event_id))).scalar_one_or_none()
+        if event is None or event.visibility != EventVisibility.PUBLISHED:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found.")
+    query = (
+        select(AttendanceCheckpoint, Event.name)
+        .join(Event, Event.id == AttendanceCheckpoint.event_id)
+        .where(
+            AttendanceCheckpoint.is_active.is_(True),
+            Event.visibility == EventVisibility.PUBLISHED,
+        )
+        .order_by(Event.name, AttendanceCheckpoint.name)
+    )
+    if event_id is not None:
+        query = query.where(AttendanceCheckpoint.event_id == event_id)
+    rows = (await db.execute(query)).all()
     return [
-        {"id": cp.id, "name": cp.name, "location": cp.location}
-        for cp in checkpoints
-        if cp.is_active
+        {
+            "id": checkpoint.id,
+            "name": checkpoint.name,
+            "location": checkpoint.location,
+            "event_id": checkpoint.event_id,
+            "event_name": event_name,
+        }
+        for checkpoint, event_name in rows
     ]

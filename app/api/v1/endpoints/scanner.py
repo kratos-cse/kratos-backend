@@ -1,7 +1,8 @@
 """Unauthenticated event check-in used by the standalone QR scanner."""
 import uuid
+from typing import Optional
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -34,7 +35,11 @@ async def scanner_events(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/checkpoints")
-async def scanner_checkpoints(event_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+async def scanner_checkpoints(
+    event_id: Optional[uuid.UUID] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """All active checkpoints when event_id is omitted. The QR still decides the event."""
     return {"status": "success", "data": await scanner_service.list_scanner_checkpoints(db, event_id)}
 
 
