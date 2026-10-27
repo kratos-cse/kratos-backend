@@ -27,7 +27,7 @@ class ManualMarkRequest(BaseModel):
 
 
 class CheckpointCreateRequest(BaseModel):
-    event_id: uuid.UUID
+    event_id: Optional[uuid.UUID] = None
     name: str = Field(min_length=1)
     location: Optional[str] = None
     is_active: bool = True

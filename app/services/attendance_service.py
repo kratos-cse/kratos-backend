@@ -4,7 +4,7 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.attendance import AttendanceCheckpoint, AttendanceScan
@@ -206,7 +206,7 @@ async def scan(
         )
         return ScanOutcome(scan=scan_row, result=AttendanceScanResult.INVALID)
 
-    if participant.event_id != checkpoint.event_id:
+    if checkpoint.event_id is not None and participant.event_id != checkpoint.event_id:
         scan_row = await _insert_scan(
             db,
             checkpoint_id=checkpoint_id,
@@ -291,14 +291,21 @@ async def manual_mark(
     if not checkpoint.is_active:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Checkpoint is not active")
 
+    reg_filters = [
+        Registration.profile_id == profile_id,
+        QRCode.is_active.is_(True),
+    ]
+    member_filters = [
+        TeamMember.profile_id == profile_id,
+        QRCode.is_active.is_(True),
+    ]
+    if checkpoint.event_id is not None:
+        reg_filters.append(Registration.event_id == checkpoint.event_id)
+        member_filters.append(TeamMember.event_id == checkpoint.event_id)
     reg_qr = await db.execute(
         select(QRCode)
         .join(Registration, QRCode.registration_id == Registration.id)
-        .where(
-            Registration.profile_id == profile_id,
-            Registration.event_id == checkpoint.event_id,
-            QRCode.is_active.is_(True),
-        )
+        .where(*reg_filters)
         .limit(1)
     )
     qr = reg_qr.scalar_one_or_none()
@@ -306,11 +313,7 @@ async def manual_mark(
         member_qr = await db.execute(
             select(QRCode)
             .join(TeamMember, QRCode.team_member_id == TeamMember.id)
-            .where(
-                TeamMember.profile_id == profile_id,
-                TeamMember.event_id == checkpoint.event_id,
-                QRCode.is_active.is_(True),
-            )
+            .where(*member_filters)
             .limit(1)
         )
         qr = member_qr.scalar_one_or_none()
@@ -363,9 +366,19 @@ async def list_checkpoints(
         return []
     q = select(AttendanceCheckpoint).order_by(AttendanceCheckpoint.created_at.desc())
     if event_id:
-        q = q.where(AttendanceCheckpoint.event_id == event_id)
+        q = q.where(
+            or_(
+                AttendanceCheckpoint.event_id == event_id,
+                AttendanceCheckpoint.event_id.is_(None),
+            )
+        )
     elif scoped_event_ids is not None:
-        q = q.where(AttendanceCheckpoint.event_id.in_(scoped_event_ids))
+        q = q.where(
+            or_(
+                AttendanceCheckpoint.event_id.in_(scoped_event_ids),
+                AttendanceCheckpoint.event_id.is_(None),
+            )
+        )
     result = await db.execute(q)
     return list(result.scalars().all())
 
@@ -373,7 +386,7 @@ async def list_checkpoints(
 async def create_checkpoint(
     db: AsyncSession,
     *,
-    event_id: UUID,
+    event_id: Optional[UUID] = None,
     name: str,
     location: Optional[str] = None,
     is_active: bool = True,

@@ -14,8 +14,8 @@ class AttendanceCheckpoint(Base):
     __tablename__ = "attendance_checkpoints"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    event_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("events.id"), nullable=False, index=True
+    event_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("events.id"), nullable=True, index=True
     )
     name: Mapped[str] = mapped_column(String, nullable=False)
     location: Mapped[Optional[str]] = mapped_column(String, nullable=True)

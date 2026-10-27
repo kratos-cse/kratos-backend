@@ -180,8 +180,7 @@ async def _participant_name(db: AsyncSession, profile_id: Optional[uuid.UUID], t
 async def public_scan(db: AsyncSession, token: str, checkpoint_id: uuid.UUID) -> dict:
     outcome = await attendance_service.scan(db, token, checkpoint_id, admin_user_id=None)
     checkpoint = await attendance_service.get_checkpoint_or_404(db, checkpoint_id)
-    event = (await db.execute(select(Event).where(Event.id == checkpoint.event_id))).scalar_one_or_none()
-    event_name = event.name if event else ""
+    event_name = await _event_name_for_scan(db, checkpoint, outcome)
     note = outcome.scan.note if outcome.scan is not None else None
     result = outcome.result
     payload: dict = {
@@ -293,31 +292,50 @@ async def list_scanner_events(db: AsyncSession) -> list[dict]:
     return [{"id": row.id, "name": row.name} for row in rows]
 
 
+async def _event_name_for_scan(db: AsyncSession, checkpoint, outcome) -> str:
+    """Common checkpoints have no event. The scanned QR supplies the event name."""
+    event_id = checkpoint.event_id
+    if event_id is None and outcome.scan is not None:
+        qr = (await db.execute(select(QRCode).where(QRCode.id == outcome.scan.qr_id))).scalar_one_or_none()
+        if qr is not None and qr.registration_id is not None:
+            from app.models.registration import Registration
+
+            event_id = (
+                await db.execute(select(Registration.event_id).where(Registration.id == qr.registration_id))
+            ).scalar_one_or_none()
+        elif qr is not None and qr.team_member_id is not None:
+            event_id = (
+                await db.execute(select(TeamMember.event_id).where(TeamMember.id == qr.team_member_id))
+            ).scalar_one_or_none()
+    if event_id is None:
+        return ""
+    event = (await db.execute(select(Event).where(Event.id == event_id))).scalar_one_or_none()
+    return event.name if event else ""
+
+
 async def list_scanner_checkpoints(db: AsyncSession, event_id: uuid.UUID | None = None) -> list[dict]:
-    """Active checkpoints for published events. Omit event_id to list every event."""
+    """Active common checkpoints (no event). These apply to every event's QR."""
     if event_id is not None:
         event = (await db.execute(select(Event).where(Event.id == event_id))).scalar_one_or_none()
         if event is None or event.visibility != EventVisibility.PUBLISHED:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found.")
-    query = (
-        select(AttendanceCheckpoint, Event.name)
-        .join(Event, Event.id == AttendanceCheckpoint.event_id)
-        .where(
-            AttendanceCheckpoint.is_active.is_(True),
-            Event.visibility == EventVisibility.PUBLISHED,
+    rows = (
+        await db.execute(
+            select(AttendanceCheckpoint)
+            .where(
+                AttendanceCheckpoint.is_active.is_(True),
+                AttendanceCheckpoint.event_id.is_(None),
+            )
+            .order_by(AttendanceCheckpoint.name)
         )
-        .order_by(Event.name, AttendanceCheckpoint.name)
-    )
-    if event_id is not None:
-        query = query.where(AttendanceCheckpoint.event_id == event_id)
-    rows = (await db.execute(query)).all()
+    ).scalars().all()
     return [
         {
             "id": checkpoint.id,
             "name": checkpoint.name,
             "location": checkpoint.location,
-            "event_id": checkpoint.event_id,
-            "event_name": event_name,
+            "event_id": None,
+            "event_name": None,
         }
-        for checkpoint, event_name in rows
+        for checkpoint in rows
     ]
