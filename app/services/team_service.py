@@ -77,6 +77,47 @@ _TERMINAL = (TeamMemberStatus.LEFT, TeamMemberStatus.REMOVED)
 _ACTIVE = (TeamMemberStatus.ACTIVE, TeamMemberStatus.PENDING_PAYMENT)
 
 
+async def _exists_non_terminal_member_on_event(
+    db: AsyncSession,
+    event_id: uuid.UUID,
+    *criteria,
+    exclude_member_id: uuid.UUID | None = None,
+) -> bool:
+    """True if any non-terminal team member on the event matches criteria (existence-only)."""
+    stmt = (
+        select(TeamMember.id)
+        .where(
+            TeamMember.event_id == event_id,
+            TeamMember.status.notin_(_TERMINAL),
+            *criteria,
+        )
+        .limit(1)
+    )
+    if exclude_member_id is not None:
+        stmt = stmt.where(TeamMember.id != exclude_member_id)
+    return (await db.execute(stmt)).first() is not None
+
+
+async def _exists_non_terminal_member_profile_phone_on_event(
+    db: AsyncSession,
+    event_id: uuid.UUID,
+    phone: str,
+) -> bool:
+    """Duplicate-phone check for linked accounts (profile.phone is not globally unique)."""
+    stmt = (
+        select(TeamMember.id)
+        .join(Profile, TeamMember.profile_id == Profile.id)
+        .where(
+            TeamMember.event_id == event_id,
+            Profile.phone == phone,
+            TeamMember.profile_id.is_not(None),
+            TeamMember.status.notin_(_TERMINAL),
+        )
+        .limit(1)
+    )
+    return (await db.execute(stmt)).first() is not None
+
+
 async def _is_active_admin(db: AsyncSession, user_id: uuid.UUID | None) -> bool:
     if user_id is None:
         return False
@@ -545,14 +586,9 @@ async def add_roster_member(
         member_profile = pref_result.scalar_one_or_none()
         if member_profile is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Profile not found")
-        existing = await db.execute(
-            select(TeamMember).where(
-                TeamMember.event_id == team.event_id,
-                TeamMember.profile_id == payload.profile_id,
-                TeamMember.status.notin_(_TERMINAL),
-            )
-        )
-        if existing.scalar_one_or_none():
+        if await _exists_non_terminal_member_on_event(
+            db, team.event_id, TeamMember.profile_id == payload.profile_id
+        ):
             raise AppError(ALREADY_REGISTERED, MSG_ALREADY_ON_TEAM_FOR_EVENT, status_code=409)
     else:
         if not as_admin and rules.member_registration_mode != MemberRegistrationMode.LEADER_MANAGED:
@@ -564,26 +600,14 @@ async def add_roster_member(
         if not payload.full_name or not payload.phone:
             raise AppError(ROSTER_INVALID, "full_name and phone are required for leader-entered members", status_code=400)
 
-        existing_phone = await db.execute(
-            select(TeamMember.id).where(
-                TeamMember.event_id == team.event_id,
-                TeamMember.phone == payload.phone,
-                TeamMember.status.notin_(_TERMINAL),
-            )
-        )
-        if existing_phone.scalar_one_or_none():
+        if await _exists_non_terminal_member_on_event(
+            db, team.event_id, TeamMember.phone == payload.phone
+        ):
             raise AppError(ALREADY_REGISTERED, MSG_DUPLICATE_PHONE_ON_EVENT, status_code=409)
 
-        existing_prof = await db.execute(
-            select(TeamMember.id)
-            .join(Profile, TeamMember.profile_id == Profile.id)
-            .where(
-                TeamMember.event_id == team.event_id,
-                Profile.phone == payload.phone,
-                TeamMember.status.notin_(_TERMINAL),
-            )
-        )
-        if existing_prof.scalar_one_or_none():
+        if await _exists_non_terminal_member_profile_phone_on_event(
+            db, team.event_id, payload.phone
+        ):
             raise AppError(ALREADY_REGISTERED, MSG_DUPLICATE_PHONE_ON_EVENT, status_code=409)
 
     pending_member = TeamMember(
@@ -751,15 +775,12 @@ async def link_member_profile(
             "This roster seat is already linked to another profile",
         )
 
-    conflict = await db.execute(
-        select(TeamMember).where(
-            TeamMember.event_id == member.event_id,
-            TeamMember.profile_id == profile.id,
-            TeamMember.status.notin_(_TERMINAL),
-            TeamMember.id != member.id,
-        )
-    )
-    if conflict.scalar_one_or_none():
+    if await _exists_non_terminal_member_on_event(
+        db,
+        member.event_id,
+        TeamMember.profile_id == profile.id,
+        exclude_member_id=member.id,
+    ):
         raise AppError(ALREADY_REGISTERED, MSG_ALREADY_ON_TEAM_FOR_EVENT, status_code=409)
 
     member.profile_id = profile.id

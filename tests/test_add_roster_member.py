@@ -36,7 +36,12 @@ from app.schemas.team import RosterAddRequest
 from app.services import team_service
 from app.services.roster_service import apply_roster_to_rules
 
-from tests.conftest import _make_event, _make_team_registration, _make_user_profile, requires_db
+from tests.conftest import (
+    _make_event,
+    _make_team_registration,
+    _make_user_profile,
+    requires_db,
+)
 
 pytestmark = requires_db
 
@@ -378,3 +383,128 @@ async def test_required_custom_gender_mcq(db):
         ),
     )
     assert any(m["phone"] == "95000000002" for m in detail["members"])
+
+
+@pytest.mark.asyncio
+async def test_add_roster_duplicate_profile_phone_multiple_rows_returns_409(db):
+    """Two linked members with profiles sharing phone must not raise MultipleResultsFound."""
+    shared_phone = "98111111111"
+    leader, team, event, _rules = await _leader_managed_paid_team(db, required=6, substitutes=0)
+
+    other_leader = await _make_user_profile(db, email=f"other-lead-{uuid.uuid4().hex}@t.local")
+    other_leader.phone = shared_phone
+    await db.flush()
+
+    other_team, _ = await _make_team_registration(db, event=event, leader=other_leader)
+    other_team.status = TeamStatus.PAID
+    other_leader_row = (
+        await db.execute(
+            select(TeamMember).where(
+                TeamMember.team_id == other_team.id,
+                TeamMember.profile_id == other_leader.id,
+            )
+        )
+    ).scalar_one()
+    other_leader_row.status = TeamMemberStatus.ACTIVE
+    await db.flush()
+
+    third_leader = await _make_user_profile(db, email=f"third-lead-{uuid.uuid4().hex}@t.local")
+    third_leader.phone = shared_phone
+    await db.flush()
+    third_team, _ = await _make_team_registration(db, event=event, leader=third_leader)
+    third_team.status = TeamStatus.PAID
+    third_leader_row = (
+        await db.execute(
+            select(TeamMember).where(
+                TeamMember.team_id == third_team.id,
+                TeamMember.profile_id == third_leader.id,
+            )
+        )
+    ).scalar_one()
+    third_leader_row.status = TeamMemberStatus.ACTIVE
+    await db.flush()
+
+    with pytest.raises(AppError) as exc:
+        await team_service.add_roster_member(
+            db,
+            team.id,
+            leader,
+            _member_payload(phone=shared_phone, full_name="Should Conflict"),
+        )
+    assert exc.value.code == ALREADY_REGISTERED
+    assert exc.value.message == MSG_DUPLICATE_PHONE_ON_EVENT
+
+
+@pytest.mark.asyncio
+async def test_add_roster_terminal_member_phone_does_not_block(db):
+    leader, team, _event, _rules = await _leader_managed_paid_team(db, required=3, substitutes=0)
+    phone = "98222222222"
+    await team_service.add_roster_member(
+        db,
+        team.id,
+        leader,
+        _member_payload(phone=phone, full_name="Former"),
+    )
+    former = (
+        await db.execute(
+            select(TeamMember).where(TeamMember.team_id == team.id, TeamMember.phone == phone)
+        )
+    ).scalar_one()
+    former.status = TeamMemberStatus.LEFT
+    await db.flush()
+
+    detail = await team_service.add_roster_member(
+        db,
+        team.id,
+        leader,
+        _member_payload(phone=phone, full_name="Replacement"),
+    )
+    assert any(m["phone"] == phone and m["full_name"] == "Replacement" for m in detail["members"])
+
+
+@pytest.mark.asyncio
+async def test_add_roster_same_phone_different_event_allowed(db):
+    leader, team, event, _rules = await _leader_managed_paid_team(db, required=3, substitutes=0)
+    phone = "98333333333"
+    await team_service.add_roster_member(
+        db,
+        team.id,
+        leader,
+        _member_payload(phone=phone, full_name="On Event A"),
+    )
+
+    other_event = await _make_event(db, name=f"Other {uuid.uuid4().hex[:6]}", team=True)
+    rules_b = (
+        await db.execute(
+            select(EventRegistrationRule).where(EventRegistrationRule.event_id == other_event.id)
+        )
+    ).scalar_one()
+    rules_b.member_registration_mode = MemberRegistrationMode.LEADER_MANAGED
+    rules_b.registration_mode = RegistrationMode.TEAM_ONLY
+    rules_b.required_member_count = 3
+    rules_b.team_min_size = 3
+    rules_b.team_max_size = 3
+    await db.flush()
+
+    leader_b = await _make_user_profile(db, email=f"lead-b-{uuid.uuid4().hex}@t.local")
+    team_b, reg_b = await _make_team_registration(db, event=other_event, leader=leader_b)
+    team_b.status = TeamStatus.PAID
+    reg_b.status = RegistrationStatus.CONFIRMED
+    leader_row_b = (
+        await db.execute(
+            select(TeamMember).where(
+                TeamMember.team_id == team_b.id,
+                TeamMember.profile_id == leader_b.id,
+            )
+        )
+    ).scalar_one()
+    leader_row_b.status = TeamMemberStatus.ACTIVE
+    await db.flush()
+
+    detail = await team_service.add_roster_member(
+        db,
+        team_b.id,
+        leader_b,
+        _member_payload(phone=phone, full_name="On Event B"),
+    )
+    assert any(m["phone"] == phone for m in detail["members"])
