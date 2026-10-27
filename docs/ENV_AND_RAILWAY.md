@@ -222,7 +222,7 @@ If SMTP is empty or wrong, notifications stay `FAILED` in the DB; **payments are
 
 | Variable | Local example | Meaning |
 |----------|---------------|---------|
-| `CORS_ORIGINS` | `http://localhost:3000` | Frontend origin(s), comma-separated |
+| `CORS_ORIGINS` | `http://localhost:3000,http://localhost:3001,http://localhost:5174` | Frontend origins, comma-separated. Include the QR scanner origin (`http://localhost:5174` by default). |
 | `APP_PUBLIC_BASE_URL` | `http://localhost:8000` | Public base URL of this API (receipt links) |
 | _(removed)_ | — | Receipts are generated on demand; no disk storage directory |
 
