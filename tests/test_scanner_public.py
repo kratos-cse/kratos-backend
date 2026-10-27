@@ -16,6 +16,7 @@ from app.services.scanner_capability import (
     decode_team_capability,
     issue_team_capability,
 )
+from app.services.qr_service import normalize_scan_token
 from app.services.scanner_rate_limit import enforce_scanner_rate_limit, reset_scanner_rate_limit
 def test_checkbox_scope_rejects_other_team_and_removed_members():
     team_id = uuid.uuid4()
@@ -90,6 +91,13 @@ def test_expired_capability_rejected():
     with pytest.raises(Exception) as exc:
         decode_team_capability(token)
     assert getattr(exc.value, "status_code", None) == 401
+
+
+def test_scan_accepts_checkin_url_or_raw_token():
+    raw = "abc_def-123"
+    assert normalize_scan_token(raw) == raw
+    assert normalize_scan_token(f"https://app.example/checkin?token={raw}") == raw
+    assert normalize_scan_token(f"/checkin?token={raw}&src=email") == raw
 
 
 def test_public_messages():
