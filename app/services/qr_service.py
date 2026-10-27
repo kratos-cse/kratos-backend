@@ -3,7 +3,6 @@ import logging
 import secrets
 import uuid
 from typing import Optional
-from urllib.parse import parse_qs, unquote, urlparse
 
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
@@ -20,22 +19,8 @@ async def get_by_id(db: AsyncSession, qr_id: uuid.UUID) -> Optional[QRCode]:
     return result.scalar_one_or_none()
 
 
-def normalize_scan_token(raw: str) -> str:
-    """Accept a raw token or a check-in URL like /checkin?token=..."""
-    value = (raw or "").strip()
-    if "token=" not in value:
-        return value
-    query = value.split("?", 1)[-1] if "?" in value else value
-    if "://" in value:
-        query = urlparse(value).query
-    found = parse_qs(query).get("token", [None])[0]
-    if not found:
-        return value
-    return unquote(found).strip()
-
-
 async def get_by_token(db: AsyncSession, token: str) -> Optional[QRCode]:
-    result = await db.execute(select(QRCode).where(QRCode.token == normalize_scan_token(token)))
+    result = await db.execute(select(QRCode).where(QRCode.token == token))
     return result.scalar_one_or_none()
 
 
