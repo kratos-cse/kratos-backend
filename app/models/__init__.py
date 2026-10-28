@@ -1,6 +1,6 @@
 from app.models.admin import AdminUser, Permission, Role  # noqa: F401
 from app.models.event_admin_assignment import EventAdminAssignment  # noqa: F401
-from app.models.attendance import AttendanceCheckpoint, AttendanceScan  # noqa: F401
+from app.models.attendance import AttendanceCheckpoint, AttendanceCorrection, AttendanceScan  # noqa: F401
 from app.models.audit_log import AuditLog  # noqa: F401
 from app.models.event import Event, EventRegistrationRule  # noqa: F401
 from app.models.event_content import (  # noqa: F401

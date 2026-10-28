@@ -25,5 +25,7 @@ def test_single_head_revision_0019():
     assert revisions["0019"]["down"] == "0018"
     assert revisions["0019"]["file"] == "0019_payment_registration_and_provider_metadata.py"
 
-    children = [r for r, meta in revisions.items() if meta["down"] == "0019"]
-    assert children == [], f"Unexpected revisions after 0019: {children}"
+    assert revisions["0020"]["down"] == "0019"
+    assert revisions["0021"]["down"] == "0020"
+    heads = [r for r, meta in revisions.items() if r not in {m["down"] for m in revisions.values() if m["down"]}]
+    assert heads == ["0021"]

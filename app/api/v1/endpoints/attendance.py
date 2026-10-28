@@ -26,6 +26,13 @@ class ManualMarkRequest(BaseModel):
     note: Optional[str] = None
 
 
+class AttendanceStateRequest(BaseModel):
+    checkpoint_id: uuid.UUID
+    checked_in: bool
+    profile_id: Optional[uuid.UUID] = None
+    team_member_id: Optional[uuid.UUID] = None
+
+
 class CheckpointCreateRequest(BaseModel):
     event_id: Optional[uuid.UUID] = None
     name: str = Field(min_length=1)
@@ -106,7 +113,7 @@ async def list_attendance_scans(
         )
     if scoped is not None and not scoped:
         return {"status": "success", "data": []}
-    scans = await attendance_service.list_scans(
+    rows = await attendance_service.list_attendance_activity(
         db,
         event_id=event_id,
         checkpoint_id=checkpoint_id,
@@ -116,7 +123,7 @@ async def list_attendance_scans(
         offset=offset,
         scoped_event_ids=scoped,
     )
-    return {"status": "success", "data": [_scan_out(s) for s in scans]}
+    return {"status": "success", "data": rows}
 
 
 @router.get("/admin/attendance/checkpoints")
@@ -193,3 +200,25 @@ async def manual_attendance(
         "status": "success",
         "data": {"result": outcome.result, "scan": _scan_out(outcome.scan)},
     }
+
+
+@router.post("/admin/attendance/state")
+async def set_attendance_state(
+    body: AttendanceStateRequest,
+    db: AsyncSession = Depends(get_db),
+    admin: AdminUser = Depends(require_permission("manual-attendance")),
+):
+    from app.services.event_access_service import require_event_access
+
+    checkpoint = await attendance_service.get_checkpoint_or_404(db, body.checkpoint_id)
+    if checkpoint.event_id is not None:
+        await require_event_access(db, admin, checkpoint.event_id, "manual-attendance", write=True)
+    result = await attendance_service.set_admin_attendance_state(
+        db,
+        checkpoint_id=body.checkpoint_id,
+        admin_user_id=admin.id,
+        checked_in=body.checked_in,
+        profile_id=body.profile_id,
+        team_member_id=body.team_member_id,
+    )
+    return {"status": "success", "data": result}

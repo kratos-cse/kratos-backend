@@ -5,7 +5,7 @@ import uuid
 from typing import Optional
 
 from fastapi import HTTPException, status
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -73,29 +73,7 @@ async def _checked_in_member_ids(
     checkpoint_id: uuid.UUID,
     members: list[TeamMember],
 ) -> set[uuid.UUID]:
-    if not members:
-        return set()
-    member_ids = [m.id for m in members]
-    profile_ids = [m.profile_id for m in members if m.profile_id is not None]
-    filters = [AttendanceScan.team_member_id.in_(member_ids)]
-    if profile_ids:
-        filters.append(AttendanceScan.profile_id.in_(profile_ids))
-    rows = (
-        await db.execute(
-            select(AttendanceScan.team_member_id, AttendanceScan.profile_id).where(
-                AttendanceScan.checkpoint_id == checkpoint_id,
-                AttendanceScan.result == AttendanceScanResult.SUCCESS,
-                or_(*filters),
-            )
-        )
-    ).all()
-    present_members = {row.team_member_id for row in rows if row.team_member_id is not None}
-    present_profiles = {row.profile_id for row in rows if row.profile_id is not None}
-    checked: set[uuid.UUID] = set()
-    for member in members:
-        if member.id in present_members or (member.profile_id and member.profile_id in present_profiles):
-            checked.add(member.id)
-    return checked
+    return await attendance_service.present_member_ids(db, checkpoint_id, members)
 
 
 async def _team_roster_payload(
@@ -269,7 +247,12 @@ async def public_member_checkin(db: AsyncSession, capability: str, team_member_i
         note="scanner_roster",
     )
     note = outcome.scan.note if outcome.scan is not None else None
-    checked = outcome.result in (AttendanceScanResult.SUCCESS, AttendanceScanResult.DUPLICATE)
+    checked = await attendance_service.is_effectively_present(
+        db,
+        scope.checkpoint_id,
+        profile_id=member.profile_id,
+        team_member_id=member.id,
+    )
     return {
         "team_member_id": member.id,
         "result": outcome.result.value,
@@ -277,6 +260,54 @@ async def public_member_checkin(db: AsyncSession, capability: str, team_member_i
         "duplicate": outcome.result == AttendanceScanResult.DUPLICATE,
         "checked_in": checked,
         "message": public_scan_message(outcome.result, note),
+    }
+
+
+async def public_set_member_attendance(
+    db: AsyncSession,
+    capability: str,
+    team_member_id: uuid.UUID,
+    checked_in: bool,
+) -> dict:
+    if checked_in:
+        return await public_member_checkin(db, capability, team_member_id)
+    scope = decode_team_capability(capability)
+    member = (
+        await db.execute(
+            select(TeamMember)
+            .options(selectinload(TeamMember.profile))
+            .where(TeamMember.id == team_member_id)
+        )
+    ).scalar_one_or_none()
+    if member is None or not member_matches_scope(
+        member_team_id=member.team_id,
+        member_event_id=member.event_id,
+        member_status=member.status,
+        scope_team_id=scope.team_id,
+        scope_event_id=scope.event_id,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This member is not on the team from the scanned QR.",
+        )
+    checkpoint = await attendance_service.get_checkpoint_or_404(db, scope.checkpoint_id)
+    if not checkpoint.is_active or checkpoint.id != scope.checkpoint_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This checkpoint is not accepting scans.")
+    await attendance_service.record_absence(
+        db,
+        checkpoint_id=scope.checkpoint_id,
+        profile_id=member.profile_id,
+        team_member_id=member.id,
+        source="scanner",
+        note="scanner_absent",
+    )
+    return {
+        "team_member_id": member.id,
+        "result": "ABSENT",
+        "recorded": False,
+        "duplicate": False,
+        "checked_in": False,
+        "message": "Marked absent.",
     }
 
 

@@ -23,6 +23,10 @@ class ScannerMemberCheckInBody(BaseModel):
     team_member_id: uuid.UUID
 
 
+class ScannerMemberAttendanceBody(ScannerMemberCheckInBody):
+    checked_in: bool
+
+
 def _client_key(request: Request) -> str:
     if request.client and request.client.host:
         return request.client.host
@@ -62,4 +66,17 @@ async def scanner_member_checkin(
 ):
     enforce_scanner_rate_limit(_client_key(request))
     data = await scanner_service.public_member_checkin(db, body.capability.strip(), body.team_member_id)
+    return {"status": "success", "data": data}
+
+
+@router.post("/member-attendance")
+async def scanner_member_attendance(
+    body: ScannerMemberAttendanceBody,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    enforce_scanner_rate_limit(_client_key(request))
+    data = await scanner_service.public_set_member_attendance(
+        db, body.capability.strip(), body.team_member_id, body.checked_in
+    )
     return {"status": "success", "data": data}

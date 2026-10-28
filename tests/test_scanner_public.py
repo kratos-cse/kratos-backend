@@ -92,6 +92,22 @@ def test_expired_capability_rejected():
     assert getattr(exc.value, "status_code", None) == 401
 
 
+def test_effective_presence_respects_later_absence():
+    from datetime import datetime, timedelta, timezone
+
+    from app.services.attendance_service import effectively_present
+
+    start = datetime.now(timezone.utc)
+    later = start + timedelta(minutes=5)
+    rescan = later + timedelta(minutes=5)
+    assert effectively_present(start, None) is True
+    assert effectively_present(None, None) is False
+    assert effectively_present(None, later) is False
+    assert effectively_present(start, later) is False
+    assert effectively_present(rescan, later) is True
+    assert effectively_present(later, start) is True
+
+
 def test_public_messages():
     assert "Checked in" in public_scan_message(AttendanceScanResult.SUCCESS, None)
     assert "Already checked in" in public_scan_message(AttendanceScanResult.DUPLICATE, "repeat_scan")
@@ -127,6 +143,20 @@ def test_forged_member_checkin_and_admin_scan_stay_closed():
         json={"checkpoint_id": str(uuid.uuid4()), "profile_id": str(uuid.uuid4())},
     )
     assert manual.status_code == 401
+    uncheck = client.post(
+        "/api/v1/scanner/member-attendance",
+        json={
+            "capability": "not-a-real-token-value-xxxx",
+            "team_member_id": str(uuid.uuid4()),
+            "checked_in": False,
+        },
+    )
+    assert uncheck.status_code == 401
+    state = client.post(
+        "/api/v1/admin/attendance/state",
+        json={"checkpoint_id": str(uuid.uuid4()), "profile_id": str(uuid.uuid4()), "checked_in": False},
+    )
+    assert state.status_code == 401
 
 
 def app_client():

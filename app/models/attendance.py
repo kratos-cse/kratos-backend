@@ -60,3 +60,33 @@ class AttendanceScan(Base):
     )
     note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AttendanceCorrection(Base):
+    """Append-only present/absent correction. Does not rewrite AttendanceScan rows."""
+
+    __tablename__ = "attendance_corrections"
+    __table_args__ = (
+        CheckConstraint(
+            "profile_id IS NOT NULL OR team_member_id IS NOT NULL",
+            name="ck_attendance_corrections_participant_identity",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    checkpoint_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("attendance_checkpoints.id"), nullable=False, index=True
+    )
+    profile_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=True, index=True
+    )
+    team_member_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("team_members.id"), nullable=True, index=True
+    )
+    present: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    admin_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("admin_users.id"), nullable=True
+    )
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
